@@ -1,0 +1,3981 @@
+#!/bin/sh
+
+################################################################################
+#DOCBEGIN
+#
+# Get "system info values" and prints to stdout.
+#
+# Either by rows of output, or a colon-delimited single line output. 
+#
+# Works on: AIX, HP-UX, Linux (Redhat/RHEL, SuSE/SLES), Solaris(SunOS).
+#
+# -filler option:  keeps total fields together
+#     if you run a "-nofunction somefucntion" with a "-filler"
+#     the function still outputs, but with "not-run" for an output
+#     this way, if you have a few systems you don't want to run a function on
+#     but want the same column layout, using the "-filler" will do this
+#
+# BUGS: 
+#      Linux heavy/centric
+#      isn't always up-to-date on each OS type
+#      doesn't run each function in all the OS types (some are no-ops)
+#
+# Written by Matt Baker mbaker@computeranddata.com
+# Version: 2015.09.30.0001
+#
+#DOCEND
+#
+################################################################################
+#
+# $Log: getnode,v $
+# Revision 1.14  2015/09/30 16:38:48  jbakerm1
+# added centrify
+#
+# Revision 1.13  2015/09/25 00:16:44  jbakerm1
+# added brief,medium,full option for amount of functions to run
+#
+# Revision 1.12  2015/09/24 22:00:18  jbakerm1
+# added many new functions
+#
+# Revision 1.11  2015/09/21 21:28:18  jbakerm1
+# rearranged order
+# added test for dnsdomain that if hostname == domainname, then it wasn't able
+# to determin dnsdomain, so make it different than hostname (not-resolved)
+#
+# Revision 1.10  2015/09/18 19:25:33  jbakerm1
+# changed Oracle lsb_release areas
+#
+# Revision 1.9  2015/09/15 21:52:37  jbakerm1
+# added -filler option for -nofunction output
+#
+# Revision 1.8  2015/09/11 22:02:06  jbakerm1
+# added /dev/null to fdisk commands
+#
+# Revision 1.7  2015/09/11 15:21:08  jbakerm1
+# change KB in disk_sizes to bigger scale
+# added RCS version to -version option
+#
+# Revision 1.6  2015/09/11 02:16:18  jbakerm1
+# fixed to the disks_total_size
+#
+# Revision 1.5  2015/09/10 21:59:19  jbakerm1
+# added disk total in GB for pvs and fdisk together for all disks
+#
+# Revision 1.4  2015/09/10 16:54:24  jbakerm1
+# added test for Oracle Enterprise release
+# fixed a type in hostname
+#
+# Revision 1.3  2015/08/12 18:08:06  jbakerm1
+# baseline
+#
+# Revision 1.2  2015/03/30 14:50:23  jbakerm1
+# added more variables
+# cleaned up some code
+#
+# Revision 1.1  2015/01/05 15:06:19  jbakerm1
+# Initial revision
+#
+# Revision 1.2  2014/10/02 02:46:41  jbakerm1
+# added lsb_release local
+#
+# Revision 1.1  2014/09/27 17:45:52  jbakerm1
+# Initial revision
+#
+################################################################################
+
+# run trap so if user exists, it cleans up processes
+trap 'f_post;exit 2' 1 2 3 15
+
+#######################################
+# Get the right shell for Linux versus all others
+#######################################
+if [ -z $MYSHELL 2> /dev/null ]
+then
+	export MYSHELL
+	MYSHELL=setnow
+	CMD=$0
+	if [ `uname` = "Linux" ]
+	then
+		exec /bin/bash $CMD "$@"
+	else
+		exec /bin/ksh  $CMD "$@"
+	fi
+fi
+
+SINGLE_LINE_OUTPUT=0
+PRINTHEADER=1
+FUNCTION=all
+DEBUG=0
+VERBOSE=0
+LEVEL=f
+SUPPORTED_OS_TYPES="AIX HP-UX Linux SunOS" 
+
+FILLER=0
+COMPANYINFOFILE=/etc/companyinfo
+OUTPUTFILE=/tmp/$(hostname).getnode.txt
+OUTFILE=0
+
+SYSCONFFILE=/tmp/$(basename $0).sysconfigfile
+
+MYFUNCTIONS=$(grep ^f_ $0 \
+	| grep -v f_runfunction \
+	| sed -e 's/()//g' \
+	| sort -u)
+
+#Sun only
+PRTDIAGFILE=/tmp/$(basename $0).prtdiag
+#HP only
+HPMACHFILE=/tmp/$(basename $0).machfile
+
+ORATAB=/etc/oratab
+
+PATH=$PATH:/usr/sbin:/sbin
+
+OSTYPE=$(uname)
+#For Linux, but not sure if this is best, 
+# removed because of bugs on some older HP versions
+# OSTYPE=$(uname -s)  
+
+#######################################
+MYGREPOPT="-w"
+if [[ $OSTYPE = HP-UX ]]
+then
+	if [[ $(uname -r)  = B.11.00 ]]
+	then
+		MYGREPOPT=""
+	fi
+fi
+#######################################
+
+#######################################
+# Functions
+#######################################
+f_myprint()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	OUTPUT=$(echo $OUTPUT \
+			| sed -e 's/:/_,_/g')
+
+	#Combine and print as a list
+	if (( $SINGLE_LINE_OUTPUT ))
+	then
+		#keep adding to TOTALS, print out at end of "main"
+		if [[ -z $HEADER_TOTAL ]]
+		then
+			HEADER_TOTAL="$HEADER"
+			OUTPUT_TOTAL="$OUTPUT"
+		else
+			HEADER_TOTAL="$HEADER_TOTAL:$HEADER"
+			OUTPUT_TOTAL="$OUTPUT_TOTAL:$OUTPUT"
+		fi
+	#Print each value as its function is completed
+	else
+		#Print the header and the output?
+		if (( $PRINTHEADER ))
+		then
+			if (( $OUTFILE))
+			then
+				echo "$HEADER:$OUTPUT" | tee $OUTPUTFILE
+			else
+				echo "$HEADER:$OUTPUT"
+			fi
+		else
+			if (( $OUTFILE))
+			then
+				echo "$OUTPUT" | tee $OUTPUTFILE
+			else
+				echo "$OUTPUT"
+			fi
+		fi
+	fi
+}
+
+##############
+f_myprint_singleline()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	#Print the header and the output?
+	if (( $PRINTHEADER ))
+	then
+		if (( $OUTFILE))
+		then
+			echo "$HEADER_TOTAL" | tee $OUTPUTFILE
+			echo "$OUTPUT_TOTAL" | tee $OUTPUTFILE
+		else
+			echo "$HEADER_TOTAL"
+			echo "$OUTPUT_TOTAL"
+		fi
+	else
+		if (( $OUTFILE))
+		then
+			echo "$OUTPUT_TOTAL" | tee $OUTPUTFILE
+		else
+			echo "$OUTPUT_TOTAL" 
+		fi
+	fi
+}
+
+##############
+f_usage()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+cat << EOF
+
+Usage: $0 [-v] [-debug] [-version]
+       [-line|-list] 
+       [-noheader]
+       [-filler]
+       [-level [b,m,def:f]]   #Brief, Medium, Full  
+       [-function    FUNCTIONNAME,FUNCTIONAME2,...]
+       [-nofunction  FUNCTIONNAME,FUNCTIONAME2,...]
+       [-listfunctions]
+       [-outfile]    tees the output to: $OUTPUTFILE
+
+       $0 -help
+       $0 [-doc|-info]
+       $0 [-v] [-debug] 
+
+       Normal            $0
+       Verbose           $0 -v
+       Noheader w/ list  $0 -noheader -list
+       Debug             $0 -debug
+       Run Function(s)   $0 -function cpucount,memory
+       NO  Function(s)   $0 -nofunction vips,domain
+
+EOF
+}
+
+##############
+f_fatal()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if [[ -w $LOGFILE_COMP ]]
+	then
+		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " \
+			| tee -a $LOGFILE_COMP
+	else
+		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " 
+	fi
+	exit $ERRVAL
+}
+
+#
+#############
+#Verify user
+#
+if [[ $(whoami) != root ]]
+then
+	ERRVAL=3
+	ERRMSG="Must be root user."
+	f_fatal
+fi
+
+##############
+f_prep()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_prep "
+	fi
+	#######################################
+	# See if supported OS
+	#######################################
+	if [[ -z $(echo $SUPPORTED_OS_TYPES | grep -i $(uname)) ]]
+	then
+		ERRVAL=3
+		ERRMSG="ERROR:3:Unsupported OS type - $(uname) \n"
+		f_fatal
+	fi
+
+	#
+	# get config data per OS flavor
+	#
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYCMD=dmidecode
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		# overwrite each time, so it is fresh
+		$MYCMD > $SYSCONFFILE 2> /dev/null
+		if [[ -n $($MYCMD -s system-manufacturer | grep -i vmware) ]]
+		then
+			VMWARE=1
+		else
+			VMWARE=0
+		fi
+
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		MYCMD=prtconf
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		# overwrite each time, so it is fresh
+		$MYCMD > $SYSCONFFILE 2> /dev/null
+
+		if [[ -x /usr/sbin/prtdiag ]]
+		then
+			MYCMD="/usr/sbin/prtdiag -v"
+		else
+			MYCMD="/usr/platform/`uname -i`/sbin/prtdiag -v"
+		fi
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		# overwrite each time, so it is fresh
+		$MYCMD > $PRTDIAGFILE 2> /dev/null
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		HWINFOFILE=/var/opt/ignite/local/hw.info
+		HOSTINFOFILE=/var/opt/ignite/local/host.info
+		MANIFESTFILE=/var/opt/ignite/local/manifest/manifest.info
+		#
+		HPFILE=0
+		if [[ -e /usr/contrib/bin/machinfo ]]
+		then
+			#itanium only, and 11.23 or later
+			MYCMD="/usr/contrib/bin/machinfo -v"
+			HPFILE=1
+		elif [[ -e /opt/ignite/bin/print_manifest ]]
+		then
+			MYCMD="/opt/ignite/bin/print_manifest"
+			HPFILE=2
+		fi
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		# overwrite each time, so it is fresh
+		$MYCMD > $HPMACHFILE 2> /dev/null
+		#
+		# HPSTYLE used later, two different output based upon system
+		# could use a better test, but this works for now
+		#
+		if (( $HPFILE == 1 ))
+		then
+			MYTEST=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+							| sed -n 2p \
+							| grep "Number of CPUs")
+			if [[ -n $MYTEST ]]
+			then
+				HPSTYLE=1
+			else
+				HPSTYLE=0
+			fi
+		fi
+
+	elif [[ $OSTYPE = AIX ]]
+	then
+		MYCMD=prtconf
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		# overwrite each time, so it is fresh
+		$MYCMD > $SYSCONFFILE 2> /dev/null
+	fi
+}
+
+f_runfunction()
+{
+	###########################################
+	# Check whether to run this function or not
+	###########################################
+	#
+	# commenting out debug because: 
+	# this function works, and it makes it makes too much noise in debug
+	#
+	#if (( DEBUG ))
+	#then
+	#	set -x
+	#fi
+	#
+	RUNMEFUNCTION=$1
+	if [[ -z $RUNMEFUNCTION ]]
+	then
+		ERRVAL=18
+		ERRMSG="No function name given for f_runfunction\n"
+		f_fatal
+	fi
+	#
+	#
+	# this is the negative test
+	#
+	# ONLY run the function IF it is NOT in the NOFUNCTION list
+	#
+	if [[ -z $(echo $NOFUNCTION_LIST | grep $MYGREPOPT $RUNMEFUNCTION) ]]
+	then
+		#
+		# this is the postive test
+		#
+		# Run the function IF RUNMEFUNCTION is in the FUNCTION_LIST
+		# OR run it if we are set to "all"
+		#
+		if [[ -n $(echo $FUNCTION_LIST | grep $MYGREPOPT $RUNMEFUNCTION ) || $FUNCTION = "all" ]]
+		then
+			$RUNMEFUNCTION
+		fi
+	else
+		#
+		# if we NOT to run the function AND FILLER is set
+		# then we want to output a HEADER with an OUTPUT of "not-run"
+		#
+		if (( $FILLER ))
+		then
+			HEADER="$(awk "/^${RUNMEFUNCTION}\(\)/,/^}$/ {print}" $0 \
+						| awk -F= '/HEADER=/ {print $2}' \
+						| sed -e 's/"//g' \
+						| sed -n 1p)"
+			OUTPUT="not-run"
+			f_myprint
+			HEADER=""
+			OUTPUT=""
+		fi
+	fi
+}
+
+##########################################
+# start of info gathering functions
+##########################################
+f_hostname()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_hostname"
+	fi
+
+	#######################################
+	HEADER="System"
+	OUTPUT=$(hostname)
+
+	f_myprint
+}
+
+f_ostype()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_ostype"
+	fi
+	#######################################
+	HEADER="OS-Type and version"
+	
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT="$(uname) $( oslevel \
+			| awk -F. '{print $1"."$2}' \
+			| sed -e 's/ //g' \
+			| tr '\012' ' ')"
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		if [[ -e /etc/enterprise-release || -e /etc/oracle-release ]]
+		then
+			if [[ -n $(cat /proc/version | grep oracle.com) ]]
+			then
+				OEL_RELEASE=1
+			else
+				OEL_RELEASE=0
+			fi
+		else
+			OEL_RELEASE=0
+		fi
+
+		if [[ -e /usr/bin/lsb_release ]]
+		then
+			PATH=$PATH:/usr/bin
+			MYFILE=lsb
+		elif [[ -e ./lsb_release ]]
+		then
+			PATH=$PATH:.
+			MYFILE=lsb
+		elif [[ -f /etc/system-release ]]
+		then
+			MYFILE=/etc/system-release
+	
+		elif [[ -f /etc/os-release ]]
+		then
+			MYFILE=/etc/os-release
+	
+		elif [[ -f /etc/redhat-release ]]
+		then
+			MYFILE=/etc/redhat-release
+	
+		elif [[ -f /etc/fedora-release ]]
+		then
+			MYFILE=/etc/fedora-release
+	
+		elif [[ -f /etc/SuSE-release ]]
+		then
+			MYFILE=/etc/SuSE-release
+	
+		elif [[ -f /etc/debian-release ]]
+		then
+			MYFILE=/etc/debian-release
+
+		elif [[ -f /etc/centos-release ]]
+		then
+			MYFILE=/etc/centos-release
+	
+		fi
+	
+		#If oracle Enterprise
+		if (( $OEL_RELEASE ))
+		then
+			MYFILE=/etc/oracle-release
+			#MYFILE=/etc/enterprise-release
+			#MYFILE=/etc/redhat-release
+
+			if [[ -e $MYFILE ]]
+			then
+				OUTPUT="$(cat $MYFILE)"
+			fi
+
+		elif [[ $MYFILE = lsb ]]
+		then
+			OUTPUT="$(lsb_release -si) $(lsb_release -sr)"
+			#OUTPUT="$(/usr/bin/lsb_release -sd)"
+
+		elif [[ $MYFILE = /etc/os-release ]]
+		then
+			OUTPUT="$(awk -F= '/PRETTY_NAME/ {print $2}' $MYFILE)"
+
+		elif [[ -n $(grep $MYGREPOPT "Red Hat" $MYFILE) ]]
+		then
+			OUTPUT="$(awk '{print $1" "$2" "$7}' $MYFILE)"
+
+		elif [[ $MYFILE = /etc/SuSE-release ]]
+		then
+			OUTPUT1="$(sed -n 1p $MYFILE | awk '{print $1}')"
+			OUTPUT="$OUTPUT1 $(grep = $MYFILE \
+						| awk -F= '{print $2}' \
+						| tr '\012' ',' \
+						| sed -e 's/"//g')"
+		else
+			OUTPUT="$(awk '{print $1" "$3}' $MYFILE)"
+		fi
+	else
+		OUTPUT="$(uname) $( uname -r \
+					| tr '\012' ' ')"
+	fi
+	OUTPUT=$(echo $OUTPUT | sed -e 's/"//g')
+	f_myprint
+}
+
+f_domain()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_domain"
+	fi
+	#######################################
+	HEADER="Domain"
+	OUTPUT=""
+	#
+	if [[ -z $HOSTNAME ]]
+	then
+		HOSTNAME=$(hostname)
+	fi
+	#
+	if [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(dnsdomainname)
+		#OUTPUT=$(hostname --fqdn))
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		OUTPUT=$(grep -i "^domain_name" $MANIFESTFILE \
+				| awk '{print $2}' \
+				| sed -e 's/^ * //g')
+
+	elif [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT="$(domainname)"
+	fi
+	
+	if [[ -z $OUTPUT ]]
+	then
+		#see if forward lookup works
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT=$(nslookup $HOSTNAME 2> /dev/null \
+						| grep -i "Name"\
+						| sed -n 1p \
+						| awk '{print $2}'\
+						| cut -d. -f2-)
+		fi
+		if [[ -z $OUTPUT ]]
+		then
+			MYIP=$(grep -v ^# /etc/hosts \
+						| grep $MYGREPOPT $HOSTNAME\
+						| sed -n 1p \
+						| awk '{print $1}')
+			#see if reverse lookup works
+			if [[ -n $MYIP ]]
+			then
+				OUTPUT=$(nslookup $MYIP 2> /dev/null \
+							| grep "name ="\
+							| sed -n 1p \
+							| awk -F= '{print $2}'\
+							| cut -d. -f2- \
+							| sed -e 's/\.$//')
+			fi
+			#see if FQDN is in hosts file 
+			if [[ -n $OUTPUT ]]
+			then
+				OUTPUT=$(grep -v ^# /etc/hosts \
+							| grep $MYGREPOPT $HOSTNAME\
+							| sed -n 1p \
+							| cut -d" " -f2- \
+							| tr " " "\012" \
+							| grep \\. \
+							| cut -d. -f2-)
+			fi
+		fi
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="could-not-determine"
+
+	elif [[ $OUTPUT = $HOSTNAME ]]
+	then
+		OUTPUT="could-not-determine"
+	fi
+
+	f_myprint
+}
+
+##############
+f_patch()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_patch"
+	fi
+	#######################################
+	HEADER="Patch Level"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OSLEVEL=$(oslevel -s )
+		MYTL=$(print $OSTYPELEVEL \
+				| awk -F- '{print $2}')
+		MYSP=$(print $OSTYPELEVEL \
+				| awk -F- '{print $3}')
+		OUTPUT="$OSLEVEL,TL=$MYTL,SP=$MYSP"
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		HEADER="$HEADER...Kernel"
+		OUTPUT=$(uname -r)
+	
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		#
+		# we used to be able to get the kernel level from $(uname -v), 
+		# but that is not reliable anymore
+		#
+		MYRELEASE=$(sed -n 1p /etc/release | awk '{print $4}')
+		if [[ -x /usr/bin/pkg ]]
+		then
+			MYKERNEL=$(pkg info kernel \
+					| awk -F: '/Branch:/ {print $2}' \
+					| sed -e 's/ //g')
+	
+		elif [[ -x /usr/bin/showrev ]]
+		then
+			MYKERNEL=$(showrev \
+					| tail -1 \
+					| awk '{print $NF}' \
+					| sed -e 's/ //g')
+	
+		else
+			MYKERNEL=$(uname -a \
+					| awk '{print $3}')
+		fi
+		OUTPUT="RELEASE=$MYRELEASE,KERNEL=$MYKERNEL"
+	
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if [[ -s $MANIFESTFILE ]]
+		then
+			OUTPUT="$(awk '/QPKBASE/ {print $2"_"$3}' $MANIFESTFILE)"
+		fi
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="$(swlist -l bundle QPKBASE 2> /dev/null \
+					| awk '/QPKBASE/ {print $1"_"$2}')"
+		fi
+		OUTPUT="$(uname -r),$OUTPUT"
+	else
+		OUTPUT=$(uname -v)
+	fi
+	f_myprint
+}
+
+##############
+f_model()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_model"
+	fi
+	#######################################
+	HEADER="Model Number"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(uname -M;grep -i 'System Model' $SYSCONFFILE \
+			| awk -F: '{print $2}')
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		MYCMD=dmidecode
+		MYTESTOUT="$($MYCMD -s system-manufacturer \
+						| grep "are not")"
+		if [[ -z $MYTESTOUT ]]
+		then
+			OUTPUT="$($MYCMD -s system-manufacturer) \
+					$($MYCMD -s system-product-name) \
+					$($MYCMD -s baseboard-product-name)"
+		else
+			OUTPUT="$($MYCMD -t 1 \
+						| egrep -e "Manufacturer:|Product Name:" \
+						| awk -F: '{print $2}') \
+					$($MYCMD -t 2 \
+						| egrep -e "Manufacturer:|Product Name:" \
+						| awk -F: '{print $2}') \
+						"
+		fi
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		#prtconf -b \
+		#	| grep banner-name \
+		#	| awk -F: '/^name:/ {print $2}'
+		MYMODEL=$(uname -i)
+		if [[ $MYMODEL = i86pc ]]
+		then
+			MYMODEL=$(sed -n 1p $PRTDIAGFILE \
+				| awk -F: '{print $2}' \
+				| sed -e 's/^ *//')
+		fi
+		OUTPUT="$MYMODEL"
+	
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/model string/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			else
+				OUTPUT=$(awk -F: '/Model:/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			fi
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT=$(awk -F= '/model string/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			fi
+		else
+			OUTPUT=$(awk -F: '/Model:/ {print $2}' $HPMACHFILE \
+					| sed -e 's/"//g' \
+					| sed -e 's/^ * //g')
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+##############
+f_arch()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_arch"
+	fi
+	#######################################
+	HEADER="Architecture"
+	if [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/model string/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			else
+				OUTPUT=$( awk -F: '/Model:/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			fi
+		else
+			OUTPUT=$(awk -F: '/Model:/ {print $2}' $HPMACHFILE \
+					| sed -e 's/"//g' \
+					| sed -e 's/^ * //g')
+		fi
+	else
+		OUTPUT=$(uname -p)
+	fi
+	f_myprint
+}
+
+##############
+f_cputype()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_cputype"
+	fi
+	#######################################
+	HEADER="CPU Type"
+	if [[ $OSTYPE = AIX ]]
+	then
+		HEADER="$HEADER,CPU implementation mode"
+		OUTPUT=$(grep -i "^Processor.Type:" $SYSCONFFILE \
+			| awk -F: '{print  $2}' \
+			| sed -e 's/ //g')
+		OUTPUT="$OUTPUT $(grep -i "^Processor.Implementation.Mode:" $SYSCONFFILE \
+			| awk -F: '{print $2}' \
+			| sed -e 's/ //g')"
+	elif [[ $OSTYPE = Linux ]]
+	then
+		MYCMD=dmidecode
+		OUTPUT=$(uname -m)
+
+		OUTPUT="$OUTPUT % $(awk -F: '/^model name/ {print $2}' /proc/cpuinfo \
+						| sort -u \
+						| awk -F@ '{print $1}')"
+		OUTPUT="$OUTPUT % $($MYCMD -t 4 \
+						| awk -F: '/Signature:/ {print $2}' \
+						| sort -u)"
+		OUTPUT="$OUTPUT % $($MYCMD -t 4 \
+						| awk -F: '/Version/ {print $2}' \
+						| grep -v 00000000000000 \
+						| sort -u \
+			 			| sed -e 's/,$//g')"
+
+	else
+		OUTPUT=$(uname -m)
+	fi
+	f_myprint
+}
+
+f_cpucount()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_cpucount"
+	fi
+	HEADER="CPUCount...CPU sockets,CPU cores"
+	#######################################
+	#
+	# You can have more cores than sockets, but not the other
+	# way around.  A socket can have 1 or more cores.
+	# 
+	# Socket: physical connection on the mother/processor board.
+	# Processor chip: IC that plugs into socket
+	# Cores: cpu/processor instances that are etched into the
+	#        the processor chip
+	# Hyperthreading: Ways of adding more "cpus" to the system
+	#        by taking advantage of multiple cpu threads.  In 
+	#        Intel, called HT, this is currently 2 threads per core.
+	#
+	# In a virutualized system (VMware for instance) this is all
+	# abstracted to the OS as it "shares" the underlying hardware
+	# with other virtualized systems.
+	#
+	#######################################
+	if [[ $OSTYPE = AIX ]]
+	then
+		#
+		# AIX runs on RS/6000, Power, PowerPC, IBM System i, System/370
+		#             PS/2, Apple Network Server
+		#
+		if [[ -x /usr/bin/lparstat ]]
+		then
+			HEADER="CPUCount...CPU cores/processors (not sockets)"
+			OUTPUT=$(lparstat \
+						| grep -i ^System.configuration: \
+						| awk -Fent= '{print $2}' \
+						| awk '{print $1}' \
+						| sed -e 's/ //g')
+	
+			HEADER="$HEADER...CPU 'levels'"
+			OUTPUT=$(lparstat -i \
+						| grep Capacity \
+						| egrep -ve 'Pool|Weight|system' \
+						| egrep -e 'Max|Min|Des' \
+						| sed -e 's/ //g;s/^.*/......&/')
+	
+			HEADER="$HEADER...CPU virtuals"
+			OUTPUT=$(lparstat -i \
+						| grep CPUs \
+						| grep Virtual \
+						| grep -v system \
+						| egrep -e 'Max|Min|Des' \
+						| sed -e 's/ //g;s/^.*/......&/')
+		else
+			HEADER="CPUCount...CPU cores/processors (not sockets)"
+			OUTPUT=$(grep -i "^Number.Of.Processors:" $SYSCONFFILE \
+						| awk -F: '{print $2}' \
+						| sed -e 's/ //g')
+		fi
+	elif [[ $OSTYPE = Linux ]]
+	then
+		#
+		# You can have more cores than sockets, but not the other
+		# way around.  A socket can have 1 or more cores.
+		#
+		# If the physical id is in cpuinfo, then we can figure
+		# out the cores per socket, else, we just count sockets
+		#
+		# Linux runs on many architectures.
+		#
+		# OTHER POSSIBLE commands:
+		#  lscpu
+		#  cd /sys/devices/system/cpu; ls
+		#  nproc
+		#  dmidecode -t 4
+		#
+		#  #If loaded#  hardinfo; lshw; lnxi; cpuid
+		#
+		#
+		HEADER="CPUCount...sockets,cores,total-cores,hyperthreads-per-cpu,cpucount-cores-plus-hypers"
+		if [[ -f /usr/bin/lscpu ]]
+		then
+			CPUCOUNT=$(lscpu \
+						| awk -F: '/^CPU\(s\):/ {print $2}'\
+						| sed -e 's/ * //g')
+			SOCKETS=$(lscpu \
+						| awk -F: '/ocket\(s\):/ {print $2}'\
+						| sed -e 's/ * //g')
+				if [[ -z $SOCKETS ]]
+				then
+					SOCKETS=1
+				fi
+			CORESPS=$(lscpu \
+						| awk -F: '/^Core\(s\) per socket:/ {print $2}'\
+						| sed -e 's/ * //g')
+			TOTALCORES=$(eval echo "$SOCKETS*$CORESPS" | bc)
+			HYPERTHREADS=$(lscpu \
+						| awk -F: '/^Thread\(s\) per core:/ {print $2}'\
+						| sed -e 's/ * //g')
+				if [[ -z $HYPERTHREADS ]]
+				then
+					HYPERTHREADS=1
+				fi
+			OUTPUT="$SOCKETS,$CORESPS,$TOTALCORES,$HYPERTHREADS,$CPUCOUNT"
+
+		elif [[ -n $(grep "physical id" /proc/cpuinfo) ]]
+		then
+			# physical sockets
+			SOCKETS="$(grep "^physical id" /proc/cpuinfo\
+						| awk -F: '{print $2}' \
+						| sort -u \
+						| wc -l \
+						| sed -e 's/ //g')"
+
+			# cores
+			#
+			# lists out each: socket#,core#,hyperthread#
+			#
+			#CNT=0
+			#CORES=0
+			#HYPERTHREADS=0
+			#TEMPCORES=0
+			#while (( CNT < $SOCKETS ))
+			#do
+			#	TEMPCORES=$(egrep "physical id|core id|apicid" /proc/cpuinfo \
+			#				| grep -v "initial apicid" \
+			#				| sed 'N;N; s/\n/  /g' \
+			#				|  awk '{print $4" "$8" "$11}' \
+			#				| sort -k 1 \
+			#				| grep $MYGREPOPT -c ^$CNT)
+			#	let CORES+=$TEMPCORES
+			#	let CNT+=1
+			#done
+
+			# cores
+			CORESPS=$(grep "^cpu cores" /proc/cpuinfo \
+							| sed -n 1p \
+							| awk -F: '{print $2}' \
+							| sed -e 's/ //g')
+			#
+			# siblings show hyperthreading - IF the number is larger than
+			# total number of cores (normally if hyperthreading is there,
+			# it will be 2x the number of cores)
+			#
+			HYPERTHREADS=$(grep "^siblings" /proc/cpuinfo \
+							| sed -n 1p \
+							| awk -F: '{print $2}' \
+							| sed -e 's/ //g')
+
+			#if (( $CORES == $HYPERTHREADS ))
+			#then
+			#	CPUCOUNT=$(echo "$SOCKETS*$CORESPS" | bc)
+			#	HYPERTHREADS=1
+			#else
+			#	CPUCOUNT=$(echo "$SOCKETS*$CORESPS+$HYPERTHREADS" | bc)
+			#   MULTIPLIER=$(echo "$HYPERTHREADS/$CORESPS" | bc)
+			#	CPUCOUNT=$(echo "$SOCKETS*$CORESPS*$MULTIPLIER" | bc)
+			#fi
+
+			CPUCORESTOTAL=$(echo "$SOCKETS*$CORESPS" | bc)
+			CPUCOUNT=$(grep -c "^processor" /proc/cpuinfo)
+
+			if (( $CORESPS == $HYPERTHREADS ))
+			then
+				HYPERTHREADS=1
+			fi
+
+			OUTPUT="$SOCKETS,$CORESPS,$CPUCORESTOTAL,$HYPERTHREADS,$CPUCOUNT"
+		else
+			#
+			#Fall through, simple catch, assumes a lot
+			#
+			#If it doesn't list out sockets from previous branch, then just 
+			#cores.  That is, we will treat this as one socket with many 
+			#cores, though, in the VMware shell profile, this may not be the 
+			#actual case.
+			#
+			CORES=$(grep -c "^processor" /proc/cpuinfo)
+			OUTPUT="1,$CORES,$CORES,1,$CORES"
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		#
+		# HP-UX runs on PA-Risc, Itanium, x86
+		#
+		HEADER="CPUCount...CPU sockets,CPU cores(per;total),CPU logicals(per;total)"
+		if (( $HPFILE == 1 ))
+		then
+			#
+			# has pattern "cores" in file
+			#
+			#################################################
+			if [[ -n $(grep core $HPMACHFILE) || -n $(grep "Cores per socket" $HPMACHFILE) ]]
+			then
+				if [[ -n $(grep "Number of enabled sockets" $HPMACHFILE) ]]
+				then
+					SOCKETS=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+								| awk -F= '/Number of enabled sockets/ {print $2}' \
+								| sed -e 's/^ *//')
+					CORES=$(awk -F= '/Cores per socket/ {print $2}' $HPMACHFILE \
+								| sed -e 's/^ *//')
+					LOGCORES=$(awk '/Logical processors/ {print $2}' $HPMACHFILE)
+				else
+					SOCKETS=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+								| awk '/sockets/ {print $1}')
+					CORES1=$(awk '/logical processors per socket/ {print $1}' $HPMACHFILE)
+					CORES2=$(awk '/cores/ {print $1}' $HPMACHFILE \
+									| sed -n 2p)
+					CORES="$CORES1;$CORES2"
+					LOGCORES1=$(awk '/logical processors per socket/ {print $3}' $HPMACHFILE)
+					LOGCORES2=$(awk '/logical processors/ {print $1}' $HPMACHFILE \
+									| sed -n 2p)
+					LOGCORES="$LOGCORES1;$LOGCORES2"
+				fi
+				if [[ -z $SOCKETS ]]
+				then
+					SOCKETS=unknown
+				fi
+				if [[ -z $CORES ]]
+				then
+					CORES=unknown
+				fi
+				if [[ -z $LOGCORES ]]
+				then
+					LOGCORES=unknown
+				fi
+			#################################################
+			else
+				if [[ -n $(grep sockets $HPMACHFILE) ]]
+				then
+					SOCKETS=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+								| awk '/sockets/ {print $1}')
+					CORES=$(awk '/logical processors/ {print $1}' $HPMACHFILE)
+					LOGCORES=$(awk '/logical processors/ {print $3}' $HPMACHFILE)
+
+				elif [[ -n $(grep "series processors" $HPMACHFILE) ]]
+				then
+					SOCKETS=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+								| awk '/series processors/ {print $1}')
+					CORES="unknown"
+					LOGCORES=$(awk '/logical processors/ {print $1}' $HPMACHFILE)
+				else
+					SOCKETS=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+								| sed -n 2p \
+								| awk '/Processor/ {print $1}')
+					CORES=$(awk '/logical processors/ {print $4}' $HPMACHFILE \
+									| sed -e 's/(//g')
+					LOGCORES=$(awk '/logical processors/ {print $1}' $HPMACHFILE)
+				fi
+				if [[ -z $SOCKETS ]]
+				then
+					SOCKETS=unknown
+				fi
+				if [[ -z $CORES ]]
+				then
+					CORES=unknown
+				fi
+				if [[ -z $LOGCORES ]]
+				then
+					LOGCORES=unknown
+				fi
+			fi
+			OUTPUT="$SOCKETS,$CORES,$LOGCORES"
+			#################################################
+		else
+			SOCKETS=$(awk '/Processors:/ {print $2}' $HPMACHFILE)
+			CORES=unknown
+			LOGCORES=unknown
+			if [[ -z $SOCKETS ]]
+			then
+				SOCKETS=unknown
+			fi
+			OUTPUT="$SOCKETS,$CORES,$LOGCORES"
+		fi
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		#
+		# Solaris runs on Sparc or x86
+		#
+		# physical sockets
+		SOCKETS=$(psrinfo -p \
+					| sed -e 's/ //g')
+		# cores
+		CORES="$SOCKETS,$(/usr/bin/kstat -m cpu_info \
+					| grep core_id \
+					| awk '{print $2}' \
+					| sort -u \
+					| wc -l \
+					| sed -e 's/ //g')"
+		# virtuals
+		#OUTPUT="$OUTPUT,$(psrinfo -vp \
+		#	| grep "physical.*virtual" \
+		#	| awk '{sum+=$5} END {print sum}')"
+
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_cpuspeed()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_cpuspeed"
+	fi
+	########################################
+	HEADER="CPU Speed"
+	if [[ $OSTYPE = AIX ]]
+	then
+		#pmcycles \
+			#| awk '{print $5" "$6}'
+		OUTPUT=$(grep -i "^Processor.Clock.Speed:" $SYSCONFFILE \
+			| awk -F: '{print $2" "$3}' \
+			| sed -e 's/^ *//')
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(awk -F: '/^model name/ {print $2}' /proc/cpuinfo \
+			| sort -u \
+			| awk -F@ '{print $2}' \
+			| sed -e 's/ * / /g' \
+			| sed -e 's/^ //')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="unknown"
+		fi
+	
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		OUTPUT=$(psrinfo -v \
+					| grep operates \
+					| sed -n 1p \
+					| awk '{print $6" "$7}' \
+					| sed -e 's/,//g;s/^ *//')
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/Clock speed/ {print $2}' $HPMACHFILE \
+							| sed -n 1p \
+							| sed -e 's/^ *//')
+			else
+				OUTPUT=$(awk '/^CPU info:/,/^$/ {print $0}' $HPMACHFILE \
+							| sed -n 2p \
+							| awk -F\( '{print $NF}' \
+							| awk -F, '{print $1}')
+			fi
+		else
+			OUTPUT=$(awk -F: '/Processor.* Speed/ {print $2}' $HPMACHFILE \
+							| sed -n 1p \
+							| sed -e 's/^ *//')
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_memory()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_memory"
+	fi
+	#######################################
+	HEADER="Memory"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(grep -i ^Memory.Size: $SYSCONFFILE \
+			| awk -F: '{print $2}' \
+			| sed -e 's/^ *//')
+		if [[ -x /usr/bin/lparstat ]]
+		then
+			HEADER="$HEADER...Memory 'levels'"
+			OUTPUT=$(lparstat -i \
+				| grep Memory \
+				| grep -v system \
+				| egrep -e 'Max|Min|Des' \
+				| sed -e 's/ //g;s/^.*/......&/')
+		fi
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(awk -F: '/^MemTotal/ {print $2}' /proc/meminfo \
+			| sed -e 's/ * / /g' \
+			| sed -e 's/^ //')
+			
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		OUTPUT=$(grep Megabytes $SYSCONFFILE\
+			| awk -F: '{print $2}' \
+			| sed -e 's/^ //g')
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/Memory/ {print $2}' $HPMACHFILE \
+						| awk '{print $1" "$2}')
+			else
+				OUTPUT=$(awk -F: '/^Memory:/ {print $2}' $HPMACHFILE \
+					| awk '{print $1" "$2}')
+			fi
+		else
+			OUTPUT=$(awk -F: '/Main Memory/ {print $2}' $HPMACHFILE \
+					| awk '{print $1" "$2}')
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_sernum()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_sernum"
+	fi
+	#######################################
+	HEADER="Serial Number"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(grep -i Machine.Serial.Number: $SYSCONFFILE\
+			| awk -F: '{print $2}' \
+			| sed -e 's/ //')
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(awk '/System Information/,/UUID:/ {print $0}' $SYSCONFFILE\
+			| grep "Serial Number:" \
+			| awk -F: '{print $2}' \
+			| sed -e 's/ //g')
+	
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		if [[ -x /usr/local/bin/sneep ]]
+		then
+			OUTPUT=$(/usr/local/bin/sneep)
+		elif [[ -x /opt/SUNWsneep/bin/sneep ]]
+		then
+			OUTPUT=$(/opt/SUNWsneep/bin/sneep)
+		elif [[ -f $COMPANYINFOFILE ]]
+		then
+			OUTPUT=$(grep -v ^# $COMPANYINFOFILE \
+				| awk -F\= '/Serial Number/  {print $2}' \
+				| sed '/^ /s/^ //')
+		elif [[ -f  /etc/sernum ]]
+		then
+			OUTPUT=$(cat /etc/sernum)
+		else
+			OUTPUT="unknown"
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/machine serial number/ {print $2}' $HPMACHFILE \
+						| awk '{print $1" "$2}')
+			else
+				OUTPUT=$(awk -F: '/Machine serial number:/ {print $2" "$3}' $HPMACHFILE \
+							| sed -e 's/^ * //g')
+			fi
+		else
+			OUTPUT=unknown
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="unknown"
+	fi
+
+	f_myprint
+}
+
+f_hostid()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_hostid"
+	fi
+	#######################################
+	HEADER="Hostid"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT="$(uname -m;hostid)"
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		OUTPUT="$(uname -i | awk '{printf "%x\n",$1}'
+)"
+	else
+		OUTPUT=$(hostid)
+	fi
+	f_myprint
+}
+
+f_firmware()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_firmware"
+	fi
+	#######################################
+	if [[ $OSTYPE = AIX ]]
+	then
+		HEADER="Firmware"
+		OUTPUT=$(lsmcode -A \
+			| awk '{print $5}')
+	elif [[ $OSTYPE = Linux ]]
+	then
+		HEADER="BIOS"
+		MYCMD=dmidecode
+		MYTESTOUT="$($MYCMD -s bios-version \
+						| grep "are not")"
+		if [[ -z $MYTESTOUT ]]
+		then
+			OUTPUT="$($MYCMD -s bios-version) \
+					$($MYCMD -s bios-release-date) \
+					$(grep "BIOS Revision:" $SYSCONFFILE \
+						| awk -F: '{print $2}' \
+						| sed -e 's/ //g')"
+		else
+			OUTPUT="$($MYCMD -t 0 \
+						| egrep -e "Vendor:|Version:|Release Date:|BIOS Revision:|Firmware Revision:" \
+						| sort \
+						| awk -F: '{print $2}') "
+		fi
+
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT=$(awk '/^BIOS Information/,/^$/ {print}' $SYSCONFFILE \
+						| egrep -e 'Version:|Firmware Revision:' \
+						| awk -F: '{print $2}' \
+						| sed -e 's/ //g' \
+			 			| tr '\012' ',' \
+			 			| sed -e 's/,$//g')
+		fi
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="unknown"
+		fi
+
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		HEADER="OBP"
+		OUTPUT=$(prtconf -V \
+			| awk '{print $2}' \
+			| sed -e 's/ //g')
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		HEADER="Firmware"
+		if (( $HPFILE == 1 ))
+		then
+			if (( $HPSTYLE ))
+			then
+				OUTPUT=$(awk -F= '/Firmware revision/ {print $2}' $HPMACHFILE \
+						| sed -e 's/"//g' \
+						| sed -e 's/^ * //g')
+			else
+				OUTPUT=$( awk -F: '/Firmware revision:/ {print $2}' $HPMACHFILE \
+							| sed -e 's/ //g')
+			fi
+		else
+			OUTPUT="unknown"
+		fi
+	else
+		HEADER="Firmware"
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_pagesize()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_pagesize"
+	fi
+	#######################################
+	HEADER="Page Size"
+	if [[ $OSTYPE = Linux || $OSTYPE = HP-UX ]]
+	then
+		OUTPUT=$(getconf PAGESIZE)
+	else
+		OUTPUT=$(pagesize)
+	fi
+	f_myprint
+}
+
+f_kerneltype()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_kerneltype"
+	fi
+	#######################################
+	HEADER="Kernel Type"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(grep -i ^CPU.Type: $SYSCONFFILE \
+			| awk -F: '{print $2}' \
+			| sed -e 's/ //g')
+	
+	elif [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(getconf LONG_BIT)
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT=$(lscpu | grep op-mode | grep 64-bit)
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT=$(awk -F: '/^flags/ {print $2}' /proc/cpuinfo \
+					| sed -n 1p \
+					| grep $MYGREPOPT lm)
+	
+				if [[ -n $OUTPUT ]]
+				then
+					OUTPUT="64-bit"
+				else
+					OUTPUT="32-bit"
+				fi
+			fi
+		fi
+		if [[ -n $(echo $OUTPUT | grep 64) ]]
+		then
+			OUTPUT="64-bit"
+		else
+			OUTPUT="32-bit"
+		fi
+		
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		if [[ -x /usr/bin/isainfo ]]
+		then
+			BITTYPE=$(isainfo -b \
+				| grep $MYGREPOPT 64)
+			if [[ -n $BITTYPE ]]
+			then
+				OUTPUT="64-bit"
+			else
+				OUTPUT="32-bit"
+			fi
+		else
+			#assuming 32 bit only
+			OUTPUT="32-bit"
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		BITTYPE=$(getconf KERNEL_BITS \
+			| grep $MYGREPOPT 64)
+		if [[ -n $BITTYPE ]]
+		then
+			OUTPUT="64-bit"
+		else
+			OUTPUT="32-bit"
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_vip()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vip"
+	fi
+	#######################################
+	HEADER="VIPs"
+	if [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(ifconfig -a \
+					| grep ^.*inet \
+					| egrep -ve "127\.0\.0\.1|::" \
+					| awk '{print $2}' \
+					| awk -F: '{print $2}' \
+					| grep -v :: \
+					| tr '\012' ',' \
+			 		| sed -e 's/,$//g')
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		#"ifconfig -a" doesn't exist on HP-UX
+		OUTPUT=$(netstat -in \
+					| awk '/^lan/ {print $4}' \
+					| grep -v none \
+					| tr '\012' ',')
+	else
+		OUTPUT=$(ifconfig -a \
+					| grep '	inet' \
+					| grep -v 127\.0\.0\.1 \
+					| awk '{print $2}' \
+					| grep -v :: \
+					| tr '\012' ',' \
+			 		| sed -e 's/,$//g')
+	fi
+	f_myprint
+}
+
+f_hba()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_hba"
+	fi
+	#######################################
+	HEADER="HBA Port count"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(lsdev -C -Fname \
+						| grep -ic fcs)
+		f_vscsi
+		f_npiv
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		#OUTPUT=$(egrep -e "fibre-channel|FC|fcw|fce|qlc|pf|lpfc|LP" \
+		#			$PRTDIAGFILE)
+		OUTPUT=$(egrep -ie "fibre-channel|fcaw|fce|fce|qlc|pf|lpfc|LP" \
+					$SYSCONFFILE \
+					| grep -c instance)
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		#
+		# get the number of ports, using patterns to figure out number
+		#
+		# maybe should use either: fcmsutil or fcdutil
+		#
+		HBACOUNT=$(grep -c $MYGREPOPT fc $MANIFESTFILE)
+		HBALOOPCOUNT=1
+		PORTCOUNT=0
+		while (( $HBALOOPCOUNT <= $HBACOUNT ))
+		do
+			PATTERN=$(grep $MYGREPOPT fc $MANIFESTFILE \
+					| sed -n ${HBALOOPCOUNT}p \
+					| egrep -i '2-port|4-port')
+			if [[ -n $PATTERN ]]
+			then
+				if [[ -n $(echo $PATTERN | grep -i 2-port) ]]
+				then
+					let PORTCOUNT=$PORTCOUNT+2
+				else
+					let PORTCOUNT=$PORTCOUNT+4
+				fi
+			else
+				let PORTCOUNT=$PORTCOUNT+1
+			fi
+			let HBALOOPCOUNT=$HBALOOPCOUNT+1
+		done
+		OUTPUT=$PORTCOUNT
+	elif [[ $OSTYPE = Linux ]]
+	then
+		#this give HBA ports
+		if [[ -d /sys/class/fc_transport ]]
+		then
+			OUTPUT=$(ls /sys/class/fc_transport/ \
+							| wc -l)
+		else
+			OUTPUT=0
+		fi
+
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_hba_spec()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_hba_spec"
+	fi
+	#######################################
+	HEADER="HBA Specs [model  firmware  driver]"
+	if [[ $OSTYPE = Linux ]]
+	then
+		#this gives HBA instances
+		#OUTPUT=$(lspci \
+		#		| grep -i "Host Adapter" \
+		#		| egrep -ice 'Fibre|Fibre')
+		#this give HBA ports
+		if [[ -n $(ls -ld /sys/class/scsi_host/host* 2> /dev/null) ]]
+		then
+			#Found that info file didn't always have model and its
+			#ordering of info wasn't consistent, so went to modelname.
+			#OUTPUT1=$(cat /sys/class/scsi_host/host*/info \
+			#		| sed -n 1p \
+			#		| awk '{print $1"_"$2}')
+			OUTPUT1=$(cat /sys/class/scsi_host/host*/modelname \
+							2> /dev/null\
+						| sed -n 1p \
+						| sed -e 's/ /_/g')
+			if [[ -z $OUTPUT1 ]]
+			then
+				OUTPUT1=$(cat /sys/class/scsi_host/host*/version_product \
+								2> /dev/null\
+							| sed -n 1p \
+							| sed -e 's/ /_/g')
+			fi
+			OUTPUT2=$(cat /sys/class/scsi_host/host*/fwrev \
+							2> /dev/null\
+						| sed -n 1p \
+						| sed -e 's/,//g' \
+						| sed -e 's/ /_/g')
+			if [[ -z $OUTPUT2 ]]
+			then
+				OUTPUT2=$(cat /sys/class/scsi_host/host*/version_fw \
+								2> /dev/null\
+							| sed -n 1p \
+							| sed -e 's/,//g' \
+							| sed -e 's/ /_/g')
+			fi
+			OUTPUT3=$(cat /sys/class/scsi_host/host*/lpfc_drvr_version \
+							2> /dev/null\
+						| sed -n 1p \
+						| awk '{print $NF}')
+			if [[ -z $OUTPUT3 ]]
+			then
+				OUTPUT3=$(cat /sys/class/scsi_host/host*/version_bios \
+								2> /dev/null\
+							| sed -n 1p \
+							| awk '{print $NF}')
+			fi
+
+			if [[ -n $(ls -ld /sys/class/scsi_host/host*/device/fc_host/host*/port_name 2> /dev/null) ]]
+			then
+				OUTPUT4=$(cat /sys/class/scsi_host/host*/device/fc_host/host*/port_name)
+			else
+				OUTPUT4=""
+			fi	
+
+			#this give HBA info
+			OUTPUT5="$(lspci -vvvv \
+						| grep -i "Host Adapter" \
+						| egrep -ie 'Fibre|Fibre' \
+						| cut -c10- \
+						| awk -F: '{print $2" "$3}' \
+						| sort -u) \
+					$(systool -v -c fc_host 2>/dev/null \
+						| grep symbolic_name \
+						| awk -F= '{print $2}' \
+						| sed -e 's/\"//g' \
+						| sort -u)"
+
+			OUTPUT="$OUTPUT1,$OUTPUT2,$OUTPUT3,$OUTPUT4,$OUTPUT5"
+		else
+			OUTPUT=0
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		MYCMD=""
+		#
+		# skipping embedded devices, sorry, future growth
+		#
+		MYDEVICE=$(ioscan -fknC fc \
+					| sed -e 1,2d \
+					| sed -e 'N;s/\n/ /' \
+					| grep -v Embedded \
+					| awk '{print $NF}'\
+					| sed -n 1p)
+		OUTPUT=$(ioscan -fknC fc \
+					| sed -e 1,2d \
+					| sed -e 'N;s/\n/ /' \
+					| grep -v Embedded \
+					| grep ^fc \
+					| sed -n 1p \
+					| awk '{print $7"_"$8}')
+
+		if [[ -n $MYDEVICE ]]
+		then
+			if [[ -n $(ioscan -funC ext_bus | grep HPVM) ]]
+			then
+				MYDEVICE=$(ioscan -funC ext_bus \
+						| sed -e 1,2d \
+						| sed -e 'N;s/\n/ /' \
+						| grep -v Embedded \
+						| awk '{print $NF}'\
+						| sed -n 1p)
+						
+			fi
+		fi
+
+		if [[ -f /opt/fcms/bin/fcmsutil ]]
+		then
+			MYCMD=/opt/fcms/bin/fcmsutil
+			OUTPUT="$OUTPUT, $($MYCMD $MYDEVICE vpd \
+					| grep -i "Product Discription" \
+					| awk -F: '{print $2}' \
+					| sed -e "s/'//g")"
+
+		elif [[ -f /opt/fcms/bin/fcdutil ]]
+		then
+			MYCMD=/opt/fcms/bin/fcdutil
+			OUTPUT="$OUTPUT, $($MYCMD $MYDEVICE vpd \
+					| grep -i "Part number" \
+					| awk -F: '{print $2}')"
+		fi
+
+		if [[ -n $MYCMD ]]
+		then
+			
+			OUTPUT="$OUTPUT, $($MYCMD $MYDEVICE \
+					| egrep -ie "Driver Version|Link Speed|Chip Revision" \
+					| awk -F= '{print $2}')"
+
+			OUTPUT="$OUTPUT, $($MYCMD $MYDEVICE vpd \
+					| egrep -ie "Firmware Version|ISP Code version|Driver Version|EFI version" \
+					| awk -F: '{print $2}' \
+					| sed -e 's/ * //g' \
+					| sed -e 's/,//g' \
+					| sed -e 's/ /_/g' \
+					| tr '\012' ',')"
+			OUTPUT="$OUTPUT, $($MYCMD $MYDEVICE \
+					| grep "N_Port Port World Wide Name" \
+					| awk -F= '{print $2}')"
+		else
+			OUTPUT="$OUTPUT, unknown"
+		fi
+
+	elif [[ $OSTYPE = AIX ]]
+	then
+		
+		if (( $(lsdev -Cc adapter | grep -c ^fcs) ))
+		then
+			HBA_VAR=$(lsdev -Cc adapter \
+						| grep ^fcs \
+						| sed -n 1p \
+						| awk '{print $1}')
+
+			HBA_TYPE="$(lscfg -vl $HBA_VAR \
+						| grep 'Part Number'  \
+						| sed -e 's/\.\./ /g' \
+						| awk '{print $NF}' \
+						| sed -e 's/\.//g' )"
+
+			HBA_DRV="$(lsdev -C -Ftype,name \
+						| grep -i fcs \
+						| awk -F, '{print $1}' \
+						| sed -n 1p)"
+
+			HBA_FIRM="$(lscfg -vl $HBA_VAR \
+						| grep -w '(Z9)' \
+						| sed -e 's/\.\./ /g' \
+						| awk '{print $NF}')"
+
+			HBA_FC="$(lsmcode -cd $HBA_VAR \
+						| awk '{print $NF}' \
+						| sed -e 's/\.//g' )"
+
+			OUTPUT="$HBA_TYPE, $HBA_DRV, $HBA_FIRM, $HBA_FC"
+		else
+			OUTPUT="none, none, none, none"
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_raid()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_raid"
+	fi
+	#######################################
+	HEADER="RAID card"
+
+	OUTPUT=""
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYFILE=/usr/sbin/hpacucli
+
+		if [[ -f $MYFILE ]]
+		then
+			#$MYFILE ctrl all show config
+			OUTPUT="$($MYFILE ctrl all show)"
+		fi
+
+		if [[ -z $OUTPUT || -n $(echo $OUTPUT | grep "No controllers detected") ]]
+		then
+			MYFILE=/proc/driver/cciss/cciss*
+			if [[ -f $(eval echo $MYFILE) ]]
+			then
+				OUTPUT="$(sed -n 1p $MYFILE \
+							| awk -F: '{print $2}'\
+							| sort -u)"
+	
+			else
+				OUTPUT=""
+			fi
+		fi
+				
+		if [[ -z $OUTPUT ]]
+		then
+			if [[ -f /usr/bin/lsscsi ]]
+			then
+				OUTPUT="$(lsscsi -l \
+							| awk '/storage HP/ {print $3" "$4" "$5}')"
+			else
+				OUTPUT=""
+			fi
+		fi
+
+		if [[ -z $OUTPUT ]]
+		then
+			#get RAID controller
+			RAIDCARD="$(lspci -vvvv \
+						| grep -i "RAID" \
+						| cut -c10- \
+						| awk -F: '{print $2}' \
+						| sort -u)"
+	
+			if [[ -n $(echo $RAIDCARD | grep "Unknown device") ]]
+			then
+				MYPATTERN="cciss"
+			else
+				MYPATTERN="Smart Array"
+			fi
+	
+			if [[ -n $RAIDCARD ]]
+			then
+				if [[ $MYPATTERN = "Smart Array" ]]
+				then
+					#Smart Array
+					TEMPOUT="$(lshal \
+							| awk '/'"$MYPATTERN"'/,/pci.subsys_product/ {print $0}' \
+							| grep -w pci.subsys_product \
+							| awk -F= '{print $2}' \
+							| sed -e "s/'//g" \
+							| sed -e "s/(.*)//g" \
+						| sort -u)"
+				else
+					#cciss
+					TEMPOUT="$(lshal \
+							| awk '/'"$MYPATTERN"'/,/pci.vendor_id/ {print $0}' \
+							| egrep -w 'info.product|pci.subsys_product|pci.vendor_id' \
+							| awk -F= '{print $2}' \
+							| sed -e "s/'//g" \
+							| sort -u)"
+				fi
+				OUTPUT="$RAIDCARD $TEMPOUT"
+			else
+				OUTPUT="unknown"
+			fi	
+		fi	
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_nic()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_nic"
+	fi
+	#######################################
+	HEADER="NIC Port count"
+	if [[ $OSTYPE = AIX ]]
+	then
+		NIC100=$(lsdev -Cc adapter \
+				| grep ent \
+				| grep -v EtherChannel \
+				| grep -vc 1000)
+		GBNIC=$(lsdev -Cc adapter \
+				| grep ent \
+				| grep -c 1000)
+		let OUTPUT=$NIC100+$GBNIC
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		#NIC100=$(egrep -ce "hme|qfe|qec|qge|nge|bge" $PRTDIAGFILE)
+		NIC100=$(egrep -ce "hme|qec|nge|bge|qfe|qge" $SYSCONFFILE)
+		GBNIC=$(egrep -ce 'be|ce|ge|gem' $PRTDIAGFILE)
+		let OUTPUT=$NIC100+$GBNIC
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		#NICS=$(lanscan -i \
+		#       | awk '{print $1}')
+		#NIC100=$(ioscan -fknC lan \
+		#	| sed 1,2d \
+		#	| grep -vc "1000Base")
+		#GBNIC=$(ioscan -fknC lan \
+		#	| sed 1,2d \
+		#	| grep -c "1000Base")
+		#
+		# get the number of ports, using patterns to figure out number
+		#
+		COUNT=0
+		for NIC in $(grep $MYGREPOPT lan $HWINFOFILE | awk '{print $2}')
+		do
+			PATTERN=$(grep $MYGREPOPT lan $HWINFOFILE \
+					| grep $NIC \
+					| egrep -iw 'dual|quad')
+			if [[ -n $PATTERN ]]
+			then
+				if [[ -n $(echo $PATTERN | grep -i dual) ]]
+				then
+					let COUNT=$COUNT+2
+				else
+					let COUNT=$COUNT+4
+				fi
+			else
+				let COUNT=$COUNT+1
+			fi
+		done
+		OUTPUT=$COUNT
+	elif [[ $OSTYPE = Linux ]]
+	then
+		HEADER="NIC Port count, NIC Model"
+		FIRSTNIC=$(ip link \
+					| awk -F: '/mtu/ {print $2}' \
+					| grep -vw lo \
+					| sed -n 1p)
+		if [[ -f /sbin/ethtool ]]
+		then
+			OUTPUT="$(lspci -vvvv \
+					| egrep -iwc 'Ethernet controller:') \
+				$(lspci -vvvv \
+					| egrep -iw 'Ethernet controller:' \
+					| cut -c10- \
+					| awk -F: '{print $2}' \
+					| sort -u) \
+				$(/sbin/ethtool -i $FIRSTNIC 2> /dev/null \
+					| egrep 'driver|version|firmware' \
+					| awk -F: '{print $2}' \
+					| sort -u )"
+		else
+			OUTPUT="$(lspci -vvvv \
+					| egrep -iwc 'Ethernet controller:') \
+				$(lspci -vvvv \
+					| egrep -iw 'Ethernet controller:' \
+					| cut -c10- \
+					| awk -F: '{print $2}' \
+					| sort -u)"
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_software()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_software"
+	fi
+	#######################################
+	OUTPUT=""
+	HEADER="Software packages - Powerpath"
+	if [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT="$(rpm -qa EMCpower.LINUX 2> /dev/null )"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="not found"
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		OUTPUT="$(swlist EMCpower 2> /dev/null \
+				| grep $MYGREPOPT EMCpower \
+				| sed -n 1p | awk '{print $3}')"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="not found"
+		fi
+	elif [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT="$(lslpp -l EMCpower.base  2> /dev/null \
+				| grep $MYGREPOPT EMCpower \
+				| awk '{print $2}' \
+				| sed -n 1p)"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="not found"
+		fi
+	elif [[ $OSTYPE = SunOS ]]
+	then
+		OUTPUT="$(pkginfo -l EMCpower 2> /dev/null \
+				| awk '/VERSION/ {print $2}' \
+		        | awk -F, '{print $1}')"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="not found"
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+	#
+	#######################################
+	HEADER="Software packages - Vmware"
+	OUTPUT=""
+	if [[ $OSTYPE = Linux ]]
+	then
+		if (( $VMWARE ))
+		then
+			if [[ -x /usr/sbin/vmware-checkvm ]]
+			then
+				OUTPUT="$(/usr/sbin/vmware-checkvm 2> /dev/null )"
+			elif [[ -x  /usr/bin/vmware-toolbox-cmd ]]
+			then
+				OUTPUT="$(/usr/bin/vmware-toolbox-cmd -v 2> /dev/null )"
+			fi
+		fi
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="not found"
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_disks()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_disks"
+	fi
+	#######################################
+	HEADER="Installed-disk-vendor-types-and-counts"
+	if [[ $OSTYPE = Linux ]]
+	then
+		#
+		# some possible output: HP, EMC, IBM, DGC (Clariion), HDS, ....
+		#
+		if [[ -e /usr/bin/lsscsi ]]
+		then
+			OUTPUT=""
+			MYTYPES="$(lsscsi 2> /dev/null \
+					| grep -iv "cd/dvd" \
+					| awk '{print $3}'\
+					| sort -u )"
+			for MYTYPE in $MYTYPES
+			do
+				if [[ -z $MYTYPES ]]
+				then
+					OUTPUT="$MYTYPE $(lsscsi 2> /dev/null \
+							| grep -cw $MYTYPE)"
+				else
+					OUTPUT="$OUTPUT,$MYTYPE $(lsscsi 2> /dev/null \
+							| grep -cw $MYTYPE)"
+				fi
+			done
+		else
+			OUTPUT=""
+			MYTYPES="$(cat /proc/scsi/scsi \
+					| grep -iv "cd/dvd" \
+					| grep -iv "cdr" \
+					| awk '/Vendor:/ {print $2}'\
+					| sort -u )"
+			for MYTYPE in $MYTYPES
+			do
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="$MYTYPE $(cat /proc/scsi/scsi \
+							| grep -iv "cd/dvd" \
+							| grep -iv "cdr" \
+							| awk '/Vendor:/ {print $2}'\
+							| grep -cw $MYTYPE)"
+				else
+					OUTPUT="$OUTPUT,$MYTYPE $(cat /proc/scsi/scsi \
+							| grep -iv "cd/dvd" \
+							| grep -iv "cdr" \
+							| awk '/Vendor:/ {print $2}'\
+							| grep -cw $MYTYPE)"
+				fi
+			done
+		fi
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		if (( $(uname -r | awk -F. '{print $2}') == 11 \
+		   && $(uname -r | awk -F. '{print $NF}') >= 31 ))
+		then
+			OUTPUT=""
+			MYTYPES="$(ioscan -m lun \
+					| awk '/^disk/ {print $8}' \
+					| sort -u)"
+
+			for MYTYPE in $MYTYPES
+			do
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="$MYTYPE $(ioscan -m lun \
+							| awk '/^disk/ {print $8}' \
+							| grep -cw $MYTYPE)"
+				else
+					OUTPUT="$OUTPUT,$MYTYPE $(ioscan -m lun \
+							| awk '/^disk/ {print $8}' \
+							| grep -cw $MYTYPE)"
+				fi
+			done
+		else
+			OUTPUT=""
+			MYTYPES="$(ioscan -FknC disk \
+					| grep -iv "dvd" \
+					| grep -iv "cdr" \
+					| awk -F: '{print $18}'\
+					| awk '{print $1}'\
+					| grep -v ^$ \
+					| sort -u)"
+			for MYTYPE in $MYTYPES
+			do
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="$MYTYPE $(ioscan -FknC disk \
+							| grep -cw $MYTYPE)"
+				else
+					OUTPUT="$OUTPUT,$MYTYPE $(ioscan -FknC disk \
+							| grep -cw $MYTYPE)"
+				fi
+			done
+		fi
+
+	elif [[ $OSTYPE = AIX ]]
+	then
+			OUTPUT=""
+			MYTYPES="$(lsdev -Cc disk \
+						| grep Available \
+						| awk '/^hdisk/ {print $4}' \
+						| sort -u)"
+
+			for MYTYPE in $MYTYPES
+			do
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="$MYTYPE $(lsdev -Cc disk \
+							| grep Available \
+							| awk '/^hdisk/ {print $4}' \
+							| grep -cw $MYTYPE)"
+				else
+					OUTPUT="$OUTPUT,$MYTYPE $(lsdev -Cc disk \
+							| grep Available \
+							| awk '/^hdisk/ {print $4}' \
+							| grep -cw $MYTYPE)"
+				fi
+			done
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_disks_total_size()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_disks_total_size"
+	fi
+	#######################################
+	HEADER="Installed-disk-sizes-in-GB"
+	if [[ $OSTYPE = Linux ]]
+	then
+		#
+		# this function does not do raw
+		# only: pvs, fdisk
+		#
+		PVS_OUTPUT=0
+		FDISK_OUTPUT=0
+
+		#pvs - in LVM
+		MYPVSFILE=/tmp/mypvs.$$
+		pvs --units g --noheadings 2> /dev/null  > $MYPVSFILE
+
+		MYCOUNT=$(cat $MYPVSFILE | wc -l)
+
+		if (( $MYCOUNT ))
+		then
+			TEMP_PVS_OUTPUT=$(cat $MYPVSFILE \
+						| sed -e 's/[Gg]//g' \
+						| awk  '{sum +=$5} END {print sum}')
+		else
+			TEMP_PVS_OUTPUT=0
+		fi
+		PVS_OUTPUT=$TEMP_PVS_OUTPUT
+
+		#disk (fdisk) that are NOT in LVM
+		LVMDISKS=$(cat $MYPVSFILE \
+					| awk '{print $1}' \
+					| tr '\012' '|' \
+					| sed -e 's@|$@@')
+
+		NONLVMDISKS=$(fdisk -lu 2> /dev/null \
+					| egrep -ie 'KB|MB|GB|TB' \
+					| grep -v mapper \
+					| awk '{print $2}' \
+					| egrep -ve "$LVMDISKS" \
+					| grep /dev/sd \
+					| sed -e 's/://g')
+
+		MYSIZE=0
+		for MYDISK in $NONLVMDISKS
+		do
+			TEMPMYSIZE=$(fdisk -lu $MYDISK 2> /dev/null \
+					| egrep -ie 'KB|MB|GB|TB' \
+					| awk '{print $3}') 
+
+			#want GB
+			TEMPMYSIZE_UNITS=$(fdisk -lu $MYDISK 2> /dev/null \
+					| egrep -ie 'KB|MB|GB|TB' \
+					| sed -e 's/,//g'\
+					| awk '{print $4}')
+
+			if  [[ -n $(echo $TEMPMYSIZE_UNITS grep MB) ]]
+			then
+				TEMPMYSIZE=$(echo "scale = 3; $TEMPMYSIZE / 1024"\
+						| bc -l )
+			elif  [[ -n $(echo $TEMPMYSIZE_UNITS grep KB) ]]
+			then
+				TEMPMYSIZE=$(echo "scale = 6; $TEMPMYSIZE / 1024 / 1024"\
+						| bc -l )
+			elif  [[ -n $(echo $TEMPMYSIZE_UNITS grep TB) ]]
+			then
+				TEMPMYSIZE=$(echo "scale = 3; $TEMPMYSIZE * 1024"\
+						| bc -l )
+			fi
+			MYSIZE=$(echo "$MYSIZE + $TEMPMYSIZE" | bc -l)
+		done
+		FDISK_OUTPUT=$MYSIZE
+
+		rm $MYPVSFILE
+
+		#Combine numbers from each, add GB to output
+		OUTPUT=$(echo "$PVS_OUTPUT + $FDISK_OUTPUT" | bc -l)
+		OUTPUT="$OUTPUT GB"
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_vgs()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vgs"
+	fi
+	#######################################
+	HEADER="Disks-vgs-sizesGB-total-and-free"
+	if [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT1="$(vgs --nosuffix --units g 2> /dev/null \
+					| sed -e 1d \
+					| awk '{print $1" "$6" "$7}' \
+					| tr '\012' ',')"
+		OUTPUT2="total $(vgs --nosuffix --units g 2> /dev/null \
+					| sed -e 1d \
+					| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
+		OUTPUT="${OUTPUT1}${OUTPUT2}"
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		HEADER="Disks-vgs-sizesMB-total-and-free"
+		OUTPUT=""
+		#this doesn't work on B.11.11, so I went
+		#undid the new "-F" method
+		#for MYVG in $(vgdisplay -F \
+						#| awk -F: '{print $1}' \
+						#| awk -F= '{print $2}' \
+		for MYVG in $(vgdisplay 2> /dev/null \
+				        | grep "VG Name" \
+						| awk '{print $3}' \
+						| cut -c6- \
+						| sort)
+		do
+			#TEMPOUT=$(vgdisplay $MYVG \
+			#		| tr ':' '\012' \
+			#		| awk -F=  '/pe_size/  {pe=$2} \
+			#					/total_pe/ {total=$2} \
+			#					/free_pe/  {free=$2} \
+			TEMPOUT=$(vgdisplay $MYVG \
+					| awk '/PE Size/  {pe=$NF} \
+							/Total PE/ {total=$NF} \
+							/Free PE/  {free=$NF} \
+						END {printf "%d %d\n", pe*total, pe*free }')
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="$MYVG $TEMPOUT"
+				TOTALUSED=$(echo $TEMPOUT | awk '{print $1}')
+				TOTALFREE=$(echo $TEMPOUT | awk '{print $2}')
+			else
+				OUTPUT="$OUTPUT, $MYVG $TEMPOUT"
+				let TOTALUSED+=$(echo $TEMPOUT | awk '{print $1}')
+				let TOTALFREE+=$(echo $TEMPOUT | awk '{print $2}')
+			fi
+		done
+		OUTPUT="$OUTPUT, total $TOTALUSED $TOTALFREE"
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_vgs_extendable_auto()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vgs_extendable_auto"
+	fi
+	#######################################
+	HEADER="VG-extendable_auto"
+	OUTPUT=""
+	if [[ $OSTYPE = HP-UX ]]
+	then
+		for MYVG in $(vgdisplay 2> /dev/null\
+							| awk '/VG Name/ {print $NF}'\
+							| sed -e 's@/dev/@@g' \
+							| sort)
+		do
+			MYVER=$(vgdisplay -v $MYVG 2> /dev/null \
+							| awk '/Version/ {print $NF}')
+			if [[ -z $MYVER ]]
+			then
+				MYVER=1
+			fi
+			CPV=$(vgdisplay -v $MYVG 2> /dev/null\
+							| grep "Cur PV" \
+							| awk '{print $3}')
+			MPV=$(vgdisplay -v $MYVG 2> /dev/null\
+							| grep "Max PV" \
+							| awk '{print $3}')
+			X=$(echo "$MPV / 2" | bc)
+			if (( $CPV <= $X ))
+			then
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="OK-${MYVG}"
+				else
+					OUTPUT="$OUTPUT,OK-${MYVG}"
+				fi
+			else
+				if [[ -z $OUTPUT ]]
+				then
+					OUTPUT="ERROR-${MYVG}-${MYVER}"
+				else
+					OUTPUT="$OUTPUT,ERROR-${MYVG}-${MYVER}"
+				fi
+			fi
+			#
+			# appended/added another test
+			#
+			PESIZE=$(vgdisplay -v $MYVG 2> /dev/null\
+							| grep "PE Size" \
+							| awk '{print $4}')
+			MPEPV=$(vgdisplay -v $MYVG 2> /dev/null\
+							| grep "Max PE per PV" \
+							| awk '{print $5}')
+			MYLUNSIZE=$(echo $PESIZE \* $MPEPV | bc -l)
+			OUTPUT="$OUTPUT max-size-LUN-MB $MYLUNSIZE"
+		done
+
+	elif [[ $OSTYPE = Linux ]]
+	then
+		for MYVG in $(vgdisplay 2> /dev/null\
+							| awk '/VG Name/ {print $NF}' \
+							| sed -e 's@/dev/@@g' \
+							| sort)
+		do
+			MYVER=$(vgdisplay -v $MYVG 2> /dev/null \
+							| awk '/Format/ {print $2}')
+			CPV=$(vgdisplay -v $MYVG 2> /dev/null \
+							| grep "Cur PV" \
+							| awk '{print $3}')
+			MPV=$(vgdisplay -v $MYVG 2> /dev/null \
+							| grep "Max PV" \
+							| awk '{print $3}')
+			#
+			# a zero in this case is infinite
+			#
+			if (( $MPV == 0 ))
+			then
+					if [[ -z $OUTPUT ]]
+					then
+						OUTPUT="OK-${MYVG}"
+					else
+						OUTPUT="$OUTPUT,OK-${MYVG}"
+					fi
+			else
+				X=`expr "$MPV" / 2`
+				if (( $CPV <= $X ))
+				then
+					if [[ -z $OUTPUT ]]
+					then
+						OUTPUT="OK-${MYVG}"
+					else
+						OUTPUT="$OUTPUT,OK-${MYVG}"
+					fi
+				else
+					if [[ -z $OUTPUT ]]
+					then
+						OUTPUT="ERROR-${MYVG}-${MYVER}"
+					else
+						OUTPUT="$OUTPUT,ERROR-${MYVG}-${MYVER}"
+					fi
+				fi
+			fi
+		done
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_vgs_extendable_raw()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vgs_extendable_raw"
+	fi
+	#######################################
+	HEADER="VG-extendable_raw"
+	OUTPUT=""
+	if [[ $OSTYPE = HP-UX ]]
+	then
+		for MYVG in $(vgdisplay 2> /dev/null\
+							| awk '/VG Name/ {print $NF}'\
+							| sed -e 's@/dev/@@g' \
+							| sort)
+		do
+			OUTPUT="${OUTPUT}%$(vgdisplay -v $MYVG 2> /dev/null \
+					| awk '/Volume groups/,/^$/ {print $0}' \
+					| sed -e 1d \
+					| egrep -e 'VG Name|Max PV|Cur PV|Act PV|Max PE per PV|PE Size|Max PE|Total PE|Alloc PE|Free PE|VG Version|VG Max Size|VG Max Extents' \
+					| cut -c29- \
+					| sed -e 's/ * //g' \
+					| tr '\012' ',')"
+		done
+		OUTPUT="${OUTPUT}%"
+
+	elif [[ $OSTYPE = Linux ]]
+	then
+		for MYVG in $(vgdisplay 2> /dev/null\
+							| awk '/VG Name/ {print $NF}' \
+							| sort)
+		do
+			OUTPUT="${OUTPUT}%$(vgdisplay -v $MYVG 2> /dev/null \
+ 					| awk '/Volume group/,/Logical volume/ {print $0}'  \
+					| sed -e \$d \
+					| sed -e 1d \
+					| egrep -e 'VG Name|Max PV|Cur PV|Act PV|VG Size|PE Size|Total PE|Alloc PE|Free  PE|Format' \
+					| cut -c25- \
+					| sed -e 's/ * //g' \
+					| tr '\012' ','  \
+					| sed -e 's/,$//')"
+		done
+		OUTPUT="${OUTPUT}%"
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_vgs_sanonly()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vgs_sanonly"
+	fi
+	#######################################
+	HEADER="Disks-vgs-sizesGB-SANONLY-total-and-free"
+	if [[ $OSTYPE = Linux ]]
+	then
+		LOCAL="$(pvs --noheadings 2> /dev/null \
+						| grep cciss \
+						| awk '{print $2}' \
+						| sort -u)"
+		if (( $(echo $LOCAL | wc -w) > 1 ))
+		then
+			LOCAL="$(echo $LOCAL |  tr '\012' '|' )"
+			OUTPUT1="$(vgs --nosuffix --noheading --units g 2> /dev/null \
+						| egrep -ve "$LOCAL" \
+						| awk '{print $1" "$6" "$7}' \
+						| tr '\012' ',')"
+			OUTPUT2="total $(vgs --nosuffix --noheading --units g 2> /dev/null \
+						| egrep -ve "$LOCAL" \
+						| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
+		else
+			OUTPUT1="$(vgs --nosuffix --noheading --units g 2> /dev/null \
+						| awk '{print $1" "$6" "$7}' \
+						| tr '\012' ',')"
+			OUTPUT2="total $(vgs --nosuffix --noheading --units g 2> /dev/null \
+						| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
+		fi
+		OUTPUT="${OUTPUT1}${OUTPUT2}"
+	else
+		OUTPUT="unknown"
+	fi
+	f_myprint
+}
+
+f_emc()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_emc"
+	fi
+	#######################################
+	HEADER="EMC_Devices"
+	if [[ -d /usr/symcli/bin ]]
+	then
+		SYMDIR=/usr/symcli/bin
+	elif [[ -d /opt/emc/SYMCLI/bin ]]
+	then
+		SYMDIR=/opt/emc/SYMCLI/bin
+	elif [[ -n $(ls /usr/symcli/*/bin 2> /dev/null) ]]
+	then
+		#
+		#Check for symcli w/ version, take the last/highest numbered version
+		#
+		SYMDIR=$(ls /usr/symcli/*/bin 2> /dev/null | sed -n \$p)
+	elif [[ -n $(ls /opt/emc/SYMCLI/*/bin 2> /dev/null) ]]
+	then
+		#
+		#Check for symcli w/ version, take the last/highest numbered version
+		#
+		SYMDIR=$(ls /opt/emc/SYMCLI/*/bin 2> /dev/null | sed -n \$p)
+	else
+		SYMDIR=""
+	fi
+	HEADER="EMC_Devices_BCV"
+	if [[ -n $SYMDIR ]]
+	then
+		#OUTPUT=$($SYMDIR/syminq 2> /dev/null \
+		#		| grep BCV)
+		MYCMD="$SYMDIR/symdg list -v 2> /dev/null"
+		OUTPUT=$(eval $MYCMD \
+			| egrep -ie "REGU|RDF" \
+			| awk '{print $1}' \
+			| sort -u \
+			| tr '\012' ',')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="no_BCV"
+		else
+			OUTPUT="BCV_devices_found"
+		fi
+	else
+		OUTPUT="unknown_no-symcli"
+	fi
+	f_myprint
+	#
+	HEADER="EMC_Devices_SRDF"
+	if [[ -n $SYMDIR ]]
+	then
+		#OUTPUT=$($SYMDIR/syminq 2> /dev/null \
+		#		| egrep -e "R1|R2|SRDF")
+		MYCMD="$SYMDIR/symrdf list pd 2> /dev/null"
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		OUTPUT=$(eval $MYCMD \
+			| egrep -ie "R1|R2|RW|NR" \
+			| awk '{print $1}' \
+			| tr '\012' ',')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="no_SRDF"
+		else
+			OUTPUT="SRDF_devices_found"
+		fi
+	else
+		OUTPUT="unknown_no-symcli"
+	fi
+	f_myprint
+	#
+	HEADER="EMC_Arrays"
+	if [[ -n $SYMDIR ]]
+	then
+		OUTPUTSYMM="$($SYMDIR/syminq 2> /dev/null \
+					| grep EMC \
+					| sed -e 's/M(.*)/    /g' \
+					| sed -e 's/GK/      /g' \
+					| awk '{print $5}' \
+					| cut -c1-2 \
+					| sort -u)"
+		OUTPUTCLAR="$($SYMDIR/syminq -clariion -v 2> /dev/null \
+					| awk -F: '/Clariion ID/ {print $2}' \
+					| sort -u)"
+		OUTPUT="$OUTPUTSYMM $OUTPUTCLAR"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="no_EMC_ARRAYS"
+		fi
+	else
+		OUTPUT="unknown_no-symcli"
+	fi
+	f_myprint
+}
+
+f_asm()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_asm"
+	fi
+	#######################################
+	HEADER="ASM_Devices"
+	OUTPUT="no_ASM"
+
+	if (( $(find /dev -name '*asm*' \( -type b -o -type c \) 2> /dev/null | wc -l ) > 0 ))
+	then
+		OUTPUT="ASM_devices_FOUND"
+
+	elif [[ -n $(ps -elf | grep asm_pmon | grep -v grep) ]]
+	then
+		OUTPUT="ASM_devices_FOUND"
+
+	elif [[ -f $ORATAB ]]
+	then
+		if [[ -n $(grep -v ^# $ORATAB 2> /dev/null | grep -i asm 2> /dev/null ) ]]
+		then
+			OUTPUT="ASM_devices_FOUND"
+		fi
+	fi
+
+
+	if [[ -e /etc/init.d/oracleasm ]]
+	then
+		OUTPUT="$OUTPUT asmlib"
+
+	elif [[ -d /etc/udev/rules.d ]]
+	then
+
+		#the last check "grep -i asm" may be a incorrect, 
+		# it is a convention only
+
+		FOUND=$(grep oracle /etc/udev/rules.d/* 2> /dev/null \
+					| grep dba \
+					| grep scsi_id \
+					| grep -i asm)
+
+		if [[ -n $FOUND ]]
+		then
+			OUTPUT="$OUTPUT udev-rules"
+		fi
+	fi
+
+	f_myprint
+}
+
+f_oracle_rac()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_oracle_rac"
+	fi
+	#######################################
+	HEADER="Oracle RAC"
+	OUTPUT="no_RAC"
+	if [[ -n $(ps -elf | grep $MYGREPOPT crsd.bin | grep -v grep) ]]
+	then
+		RACDIR=$(dirname $(ps -elf \
+							| grep $MYGREPOPT crsd.bin \
+							| grep -v grep \
+							| sed -e 's/reboot//' \
+							| awk '{print $NF}' ) )
+		
+		RACSYSTEMS=$($RACDIR/olsnodes 2> /dev/null | tr '\012' '_')
+
+		if [[ -n $RACSYSTEMS ]]
+		then
+			OUTPUT="RAC_running_on_$RACSYSTEMS"
+		fi
+	fi
+	f_myprint
+}
+
+f_veritas()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_veritas"
+	fi
+	#######################################
+	HEADER="VCS_Cluster"
+	if [[ -f /etc/VRTSvcs/conf/config/main.cf ]]
+	then
+		OUTPUT="VCS_is_enabled"
+	elif [[ -n $( ps -elf | grep $MYGREPOPT /opt/VRTSvcs/bin/had > /dev/null) ]]
+	then
+		OUTPUT="VCS_is_enabled"
+	else
+		OUTPUT="no_VCS"
+	fi
+	f_myprint
+	#
+	#
+	#
+	HEADER="VRTS_VXVM"
+	if [[ -f /opt/VRTS/bin/vxdg ]]
+	then
+		if (( $(/opt/VRTS/bin/vxdg list 2> /dev/null | grep -vc NAME) ))
+		then
+			OUTPUT="VRTS_VXVM_is_enabled "
+		else
+			OUTPUT="no_VRTS_VXVM"
+		fi
+	elif [[ -n $(ls -d /opt/VRTSvxvm 2> /dev/null) ]]
+	then
+		OUTPUT="VRTS_VXVM_is_enabled"
+	#elif [[ -n $(grep vxfs /etc/fstab 2> /dev/null) ]]
+	#then
+	#	OUTPUT="VRTS_VXVM_is_enabled"
+	#elif [[ -d /etc/vx/elm ]]
+	#then
+	#	OUTPUT="VRTS_VXVM_is_enabled"
+	#elif [[ -d /etc/vx/licenses/db ]]
+	#then
+	#	OUTPUT="VRTS_VXVM_is_enabled"
+	#elif [[ -d /etc/vx/licenses/lic ]]
+	#then
+	#	OUTPUT="VRTS_VXVM_is_enabled"
+	else
+		OUTPUT="no_VRTS_VXVM"
+	fi
+	f_myprint
+}
+
+f_vscsi()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vscsi"
+	fi
+	#######################################
+	HEADER="VSCSI count"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(lspath \
+			| grep vscsi \
+			| awk '{print $NF}' \
+			| sort -u \
+			| wc -l \
+			| sed -e 's/ //g')
+	else
+		OUTPUT="not-applicable"
+	fi
+	f_myprint
+}
+
+f_npiv()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_npiv"
+	fi
+	#######################################
+	HEADER="NPIV count"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(lspath \
+			| grep fscsi \
+			| awk '{print $NF}' \
+			| sort -u \
+			| wc -l \
+			| sed -e 's/ //g')
+	else
+		OUTPUT="not-applicable"
+	fi
+	f_myprint
+}
+
+f_console()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_console"
+	fi
+	#######################################
+	HEADER="Console"
+	if [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT=$(lsrsrc IBM.ManagementServer \
+			| grep Hostname \
+			| grep -v Local \
+			| awk -F= '{print $2}' \
+			| sed -e 's/"//g;s/^ //' \
+			| tr '\012' ',')
+		if [[ -z $OUTPUT ]]	
+		then
+			OUTPUT="not-found"
+		fi
+	else
+		OUTPUT="not-applicable"
+	fi
+	f_myprint
+}
+f_dbms()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_dbms"
+	fi
+	#######################################
+	HEADER="DBMS Oracle"
+	if [[ -f $ORATAB ]]
+	then
+		OUTPUT=$(egrep -ve '^$|^#' $ORATAB \
+				| grep -v ^* \
+				| grep ^.*: \
+				| awk -F: '{print $1}' \
+				| tr '\012' ',')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="no_Oracle-instances"
+		fi
+	else
+		OUTPUT="no_Oracle"
+	fi
+	f_myprint
+}
+
+f_clustered()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_clustered"
+	fi
+	#######################################
+	HEADER="Clustering"
+
+	#ServiceGuard
+		#many paths to this command - it lives in too many places
+	MYCMD1="cmviewcl"
+	MYCMD1OPTS="-l package"
+	#MYCMD1OPTS="-f line -v"
+	for MYPATH in /opt/cmcluster/bin /usr/sbin /usr/local/cmcluster/bin
+	do
+		if [[ -e $MYPATH/cmviewcl ]]
+		then
+			MYCMD1="$MYPATH/cmviewcl"
+			break
+		fi
+	done
+
+	#HAE
+	MYCMD2="/usr/sbin/crm"
+	MYCMD2OPTS="resource list"
+
+	#HAE pacemaker
+	MYCMD3="/usr/sbin/crm_mon"
+	MYCMD3OPTS="-1"
+
+	#VCS
+	MYCMD4="/opt/VRTSvcs/bin/hastatus"
+	MYCMD4OPTS="-sum"
+
+	if [[ -e $MYCMD1 ]]
+	then
+		MYCMDX="$MYCMD1 $MYCMD1OPTS"
+		OUTPUT="Packages% $($MYCMDX 2> /dev/null \
+					| grep -v PACKAGE \
+					| awk '{print $1}' \
+					| sort -u \
+					| tr '\012' ',')"
+		OUTPUT="$OUTPUT %NODES% $($MYCMD1 -f line -l node 2> /dev/null \
+					| awk -F: '{print $2}' \
+					| awk -F\| '{print $1}' \
+					| sort -u \
+					| tr '\012' ',')"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="Cluster is NOT configured"
+		else
+			OUTPUT="ServiceGuard $OUTPUT"
+		fi
+	elif [[ -e $MYCMD2 ]]
+	then
+		MYCMD2="$MYCMD2 $MYCMD2OPTS"
+		OUTPUT=$($MYCMD2 2> /dev/null \
+					| awk -F: '/Resource Group:/ {print $2}'\
+					| sort -u \
+					| tr '\012' ',')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="Cluster is NOT configured"
+		else
+			OUTPUT="HAE(crm) $OUTPUT"
+		fi
+	elif [[ -e $MYCMD3 ]]
+	then
+		MYCMD3="$MYCMD3 $MYCMD3OPTS"
+		#do this because it can be there, but not communicating
+		$MYCMD3 1> /dev/null 2> /dev/null 
+		if (( $? ))
+		then
+			if [[ -f /opt/cmcluster/conf/cmclnodelist ]]
+			then
+				NODES=$(grep -v ^# /opt/cmcluster/conf/cmclnodelist \
+								| grep -v ^$ \
+								| awk '{print $1}' \
+								| tr '\012' ',')
+			else
+				NODES="unknown"
+			fi
+				OUTPUT="HAE(crm_mon) $NODES configured-but-comm-issues"
+		else
+			OUTPUT=$($MYCMD3 2> /dev/null \
+							| awk -F: '/^Resource Group/ {print $2}' \
+							| sort -u \
+							| tr '\012' ',')
+	
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="Cluster is NOT configured"
+			else
+				OUTPUT="HAE(crm_mon) $OUTPUT"
+			fi
+		fi
+	elif [[ -e $MYCMD4 ]]
+	then
+		MYCMD4="$MYCMD4 $MYCMD4OPTS"
+		OUTPUT=$($MYCMD4 2> /dev/null \
+					| awk '/^B / {print $2}' \
+					| sort -u \
+					| tr '\012' ',')
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="Cluster is NOT configured"
+		else
+			OUTPUT="VCS	$OUTPUT"
+		fi
+	else	
+		OUTPUT="Cluster software NOT installed"
+	fi
+	f_myprint
+}
+
+f_swap()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_swap"
+	fi
+	#######################################
+	HEADER="Swap Size"
+	if [[ $OSTYPE = SunOS ]]
+	then
+		OUTPUT=$(swap -s 2> /dev/null \
+						| awk '{print $2}')
+
+	elif [[ $OSTYPE = AIX ]]
+	then
+		OUTPUT="$(swap -l 2> /dev/null \
+						| sed -n 2p \
+						| awk '{print $4}')"
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="$(lsps -a 2> /dev/null \
+						| sed -n 2p \
+						| awk '{print $4}')"
+		fi
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		OUTPUT="$(swapinfo -d 2> /dev/null \
+						| awk '/^dev/ {print $2}') KB"
+
+	elif [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT="$(cat /proc/meminfo \
+						| awk -F: '/SwapTotal:/ {print $2" "$3}' \
+						| sed -e 's/ * //' )"
+
+	else
+		OUTPUT="swap-unknown"
+	fi
+	f_myprint
+}
+
+f_automation ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_automation"
+	fi
+	#######################################
+	HEADER="Automation Info"
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYFILE=/temp/paramapp.txt
+		if [[ -s $MYFILE ]]
+		then
+			OUTPUT=$(awk -F= '{print $2}' $MYFILE)
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_automation-empty-file"
+			fi
+		else
+			OUTPUT="no_automation-file-not-found"
+		fi
+	else
+		OUTPUT="not-applicable"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="no_automation"
+	fi
+
+	f_myprint
+}
+
+f_linuxvirt()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_linuxvirt"
+	fi
+	#######################################
+	HEADER="Linux Virtualization"
+
+	if [[ $OSTYPE = Linux ]]
+	then
+
+		OUTPUT=""
+		MYOUTPUT1=$(dmidecode -s system-product-name 2> /dev/null)
+
+		if [[ -n $(echo $MYOUTPUT1 | grep -wi VMware) ]]
+		then
+			#VMware Virtual Platform
+			OUTPUT=$MYOUTPUT1
+
+		elif [[ -n $(echo $MYOUTPUT1 | grep -wi VirtualBox) ]]
+		then
+			OUTPUT=$MYOUTPUT1
+
+		elif [[ -n $(echo $MYOUTPUT1 | grep -wi KVM) ]]
+		then
+			#Qemu with KVM
+			OUTPUT=$MYOUTPUT1
+
+		elif [[ -n $(echo $MYOUTPUT1 | grep -wi Bochs) ]]
+		then
+			#Qemu (emulated) - Bochs
+			OUTPUT=$MYOUTPUT1
+		fi
+
+		if [[ -z $OUTPUT ]]
+		then
+			MYOUTPUT2=$(dmidecode | grep domU  2> /dev/null)
+			if [[ -n $MYOUTPUT2 ]]
+			then
+				#
+				#Xen
+				#dmidecode | grep -i domU
+				#Product Name: HVM domU
+				OUTPUT=$MYOUTPUT2
+			fi
+		fi
+
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="no_virtualization"
+		fi
+
+		if [[ -f /.dockerinit || -n $(env | grep "container=lxc") ]]
+		then
+			OUTPUT="$OUTPUT - docker-container"
+		elif [[ -n $(which docker 2> /dev/null | grep -v alias | grep docker) ]]
+		then
+			OUTPUT="$OUTPUT - docker containers% $(docker ps)"
+		else
+			OUTPUT="$OUTPUT - not-a-container"
+		fi
+
+	else
+		OUTPUT="no_virtualization"
+	fi
+
+	f_myprint
+}
+
+f_hpvirtual()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_hpvirtual"
+	fi
+	#######################################
+	HEADER="HPVirtual"
+	if [[ $OSTYPE = HP-UX ]]
+	then
+        #
+        # HP-VM Guests
+        #
+		MYVMPATH=/opt/hpvm/bin
+		MYCMD=$MYVMPATH/hpvminfo
+		if [[ -f $MYCMD ]]
+		then
+			VALID=$($MYCMD 2> /dev/null | grep -v "Not on")
+		fi
+		if [[ -n $VALID ]]
+		then
+			MYTYPE=$($MYCMD | awk '{print $NF}' | sed -e 's/\.//g')
+	
+			if [[ -n $(echo $MYTYPE | grep host) ]]
+			then
+				GUESTS="$($MYVMPATH/hpvmstatus 2> /dev/null \
+								| sed -e 1,3d \
+								| awk '{print $1}')"
+
+				OUTPUT="VM guests with disk count, "
+				#OUTPUT="host for $(echo $GUESTS \
+				#				| sed -e 's/ /,/g')"
+
+				for GUEST in $GUESTS
+				do
+					MYEMC=0
+					MYIBM=0
+					MYDISKS="$($MYVMPATH/hpvmdevinfo -P $GUEST 2> /dev/null \
+								| awk -F/ '/rdisk/ {print $4}' \
+								| sed -e 's/disk//g')"
+					for MYDISK in $MYDISKS
+					do
+						#Assume EMC or IBM (SVC), that is all we care about
+						TEMPOUT=$(ioscan -fkNC disk | grep -w $MYDISK )
+						if [[ -n $(echo $TEMPOUT | grep EMC) ]]
+						then
+							let MYEMC=$MYEMC+1
+						elif [[ -n $(echo $TEMPOUT | grep IBM) ]]
+						then
+							let MYIBM=$MYIBM+1
+						fi
+					done
+					OUTPUT="$OUTPUT $GUEST EMC $MYEMC SVC/IBM $MYIBM, "
+				done
+			else
+				OUTPUT="guest of $($MYCMD -S 2> /dev/null \
+								| awk -F: '/^Server hostname/ {print $2}')"
+			fi
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_VMs"
+			fi
+		else
+			OUTPUT="no_VMs"
+		fi
+		f_myprint
+        #
+        # containers
+        #
+		MYVMPATH=/sbin
+		MYCMD=$MYVMPATH/srp
+		if [[ -f $MYCMD ]]
+		then
+			VALID=$($MYCMD -list 2> /dev/null | grep -v "Not on")
+		fi
+		if [[ -n $VALID ]]
+		then
+			OUTPUT="$($MYCMD -list 2> /dev/null \
+						| sed -e 1,2d \
+						| awk '{print $1}')"
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_containers"
+		    else
+				OUTPUT="VM containers, $OUTPUT"
+			fi
+		else
+			OUTPUT="no_containers"
+		fi
+		f_myprint
+        #
+        # vpars
+        #
+		MYVMPATH=/usr/sbin
+		MYCMD=$MYVMPATH/vparstatus
+		VALID=""
+		if [[ -f $MYCMD ]]
+		then
+			VALID="$($MYCMD 2> /dev/null)"
+		fi
+		if [[ -n $VALID ]]
+		then
+			if [[ $(uname -r)  = B.11.00 ]]
+			then
+				OUTPUT=$($MYCMD 2> /dev/null \
+					| awk '/\[Virtual Partition\]/, /^$/ {print $1}' \
+					| sed -e 1,4d | grep -v ^$ | tr '\012' ' ')
+			else
+				OUTPUT=$($MYCMD 2> /dev/null \
+					| awk '/\[Virtual Partition\]/, /^$/ {print $2}' \
+					| sed -e 1,3d | grep -v ^$ | tr '\012' ' ')
+			fi
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_vpars"
+		    else
+				OUTPUT="Vpars, $OUTPUT"
+			fi
+		else
+			OUTPUT="no_vpars"
+		fi
+		f_myprint
+	else
+		#VM
+		OUTPUT="not-applicable"
+		f_myprint
+		#Container
+		OUTPUT="not-applicable"
+		f_myprint
+		#Vpar
+		OUTPUT="not-applicable"
+		f_myprint
+	fi
+}
+
+f_companyinfo ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_companyinfo"
+	fi
+	#######################################
+	HEADER="Company Info"
+
+	if [[ -f $COMPANYINFOFILE ]]
+	then
+		#
+		#============================================================
+		#
+		# Things that /etc/companyinfo may/might contain:
+		#
+		#  Serial Number  = abc123456
+		#  Business Unit  = corp
+		#  Server Usage   = prod|dev|test
+		#  Server Type    = base | web | oracle | db2 | infra
+		#  Location       = datacenter X
+		#  Server Purpose = purchaseing database
+		#  Lease Number   = xyz123456abc
+		#  OldNames       = system1 system2
+		#  Maintenance    = platinum|gold|silver|bronze
+		#  Page           = yes|no
+		#  Virtualmachine = vserver1
+		#  Assetnumber    = 1A2B3C
+		#  Installer      = who installed: name of sysadmin or automation tool
+		#  Date Installed = date system OS was initially installed 
+		#  Miscellaneous  = ---free-text---
+		#
+		#============================================================
+		#
+
+        OUTPUT=""
+		MYCNT=1
+		MYCOUNT=$(grep -v ^# $COMPANYINFOFILE | wc -l | awk '{print $1}')
+		HOSTNAME=$(hostname)
+
+		if (( $MYCOUNT ))
+		then
+			while (( $MYCNT <= $MYCOUNT))
+			do
+				MYLINE=$(grep -v ^# $COMPANYINFOFILE \
+							| sed -n ${MYCNT}p )
+				HEADER="Companyinfo, $(echo $MYLINE | awk -F= '{print $1}' \
+							| sed -e 's/ * //g')"
+				OUTPUT="$(echo $MYLINE | awk -F= '{print $2}')"
+
+				f_myprint
+				let MYCNT=$MYCNT+1
+			done
+		else
+			OUTPUT="no_entries-in-$COMPANYINFOFILE"
+			f_myprint
+		fi
+
+	else
+		OUTPUT="no_$COMPANYINFOFILE"
+		f_myprint
+	fi
+}
+
+f_stats ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_stats"
+	fi
+	#######################################
+	HEADER="Stats"
+
+	OUTPUT=$(uptime 2> /dev/null)
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="no_uptime-data"
+	fi
+
+	f_myprint
+}
+
+f_security ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_security"
+	fi
+	#######################################
+	HEADER="Security"
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYFILE=/usr/sbin/getenforce
+		if [[ -e $MYFILE ]]
+		then
+			OUTPUT=$($MYFILE)
+		else
+			OUTPUT="no-security"
+		fi
+	else
+		OUTPUT="not-applicable"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="no-security"
+	fi
+	
+	f_myprint
+}
+
+f_perfprofile ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_perfprofile"
+	fi
+	#######################################
+	HEADER="Performance"
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYFILE=/etc/tune-profiles/active-profile
+		if [[ -s $MYFILE ]]
+		then
+			OUTPUT=$(cat $MYFILE)
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_performance-empty-file"
+			fi
+		else
+			OUTPUT="no_performance-file-not-found"
+		fi
+	else
+		OUTPUT="not-applicable"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="no_performance"
+	fi
+	
+	f_myprint
+}
+
+
+f_centrify ()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_centrify"
+	fi
+	#######################################
+	HEADER="Centrify"
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		MYFILE=/usr/bin/adinfo
+		if [[ -x $MYFILE ]]
+		then
+			OUTPUT=$( adinfo --server; adinfo --zone | awk -F/ '{print $NF}')
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="no_domains-not-setup"
+			fi
+		else
+			OUTPUT="no_centrify-file-not-found"
+		fi
+	else
+		OUTPUT="not-applicable"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="no_centrify"
+	fi
+	
+	f_myprint
+}
+
+##############
+f_post()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_post"
+	fi
+	#######################################
+	HEADER="date_of_collection"
+	OUTPUT="$(date \
+				| sed -e 's/ /_/g;s/:/_/g')"
+	f_myprint
+
+	#######################################
+	HEADER="$(basename $0)_version"
+	OUTPUT="$(grep -i "#.*VERSION:" $0 \
+							| sed -n 1p \
+							| awk '{print $3}')"
+	f_myprint
+
+	#######################################
+	for MYFILE in $SYSCONFFILE $PRTDIAGFILE $HPMACHFILE
+	do
+		if [[ -f $MYFILE ]]
+		then
+			rm $MYFILE
+		fi
+	done
+}
+
+#######################################
+# Parse input
+# 
+# Difficult to parse because of the exec
+# to handle ksh versus bash
+#######################################
+while (( $# ))
+do
+	case $1 in
+		-noheader)
+			shift
+			PRINTHEADER=0
+			;;
+		-filler)
+			shift
+			FILLER=1
+			;;
+
+		-line|-list)
+			shift
+			SINGLE_LINE_OUTPUT=1
+			;;
+
+		-outfile)
+			shift
+			OUTFILE=1
+			;;
+
+		-level)
+			shift
+			LEVEL=$1
+			shift
+			if [[ -z $(echo $LEVEL | egrep -we 'b|m|f') ]]
+			then
+				f_usage
+				ERRVAL=1
+				ERRMSG="Incorrect option for '-level' of: $LEVEL \n"
+				f_fatal
+			fi
+			;;
+
+		-listfunctions) 
+			shift
+			echo "Functions available are:"
+			echo "BEGIN of listing"
+			echo "$MYFUNCTIONS"
+			echo "END of listing"
+			exit 0		
+			;;
+
+		-function) 
+			shift
+			FUNCTION=$1
+			shift
+			FUNCTION_LIST=$(echo $FUNCTION \
+							| sed -e 's/^.*/f_&/' \
+							| sed -e 's/,/ f_/g' \
+							| sed -e 's/f_f_/f_/g')
+			for TEMPFUNCTION in $FUNCTION_LIST
+			do
+				if [[ -z $(echo $MYFUNCTIONS | grep $MYGREPOPT $TEMPFUNCTION) ]]
+				then
+					echo "Functions available are:"
+					echo "BEGIN of listing"
+					echo "$MYFUNCTIONS"
+					echo "END of listing"
+					ERRVAL=9
+					ERRMSG="Function not found $TEMPFUNCTION.\n"
+					f_fatal
+				fi
+			done
+			;;
+		
+		-nofunction) 
+			shift
+			NOFUNCTION=$1
+			shift
+			NOFUNCTION_LIST=$(echo $NOFUNCTION \
+							| sed -e 's/^.*/f_&/' \
+							| sed -e 's/,/ f_/g' \
+							| sed -e 's/f_f_/f_/g')
+			for TEMPFUNCTION in $NOFUNCTION_LIST
+			do
+				if [[ -z $(echo $MYFUNCTIONS | grep $MYGREPOPT $TEMPFUNCTION) ]]
+				then
+					echo "Functions available are:"
+					echo "BEGIN of listing"
+					echo "$MYFUNCTIONS"
+					echo "END of listing"
+					ERRVAL=13
+					ERRMSG="Function not found $TEMPFUNCTION.\n"
+					f_fatal
+				fi
+			done
+			;;
+
+		-debug) 
+			DEBUG=1
+			set -x
+			shift
+			;;
+
+		-v) 
+			VERBOSE=1
+			shift
+			;;
+
+		-version) 
+			echo "$0: Version: $(grep -i "#.*VERSION:" $0 \
+							| sed -n 1p \
+							| awk '{print $3}' )"
+
+		    echo "$0: RCS-Revision: $(grep "# Revision" $0 \
+								| sed -n 1p \
+								| awk '{print $3}')"
+
+			exit 0
+			;;
+
+		#help
+		-h*|--h*)
+			f_usage
+			ERRVAL=1
+			ERRMSG="Help getting syntax/usage.\n"
+			f_fatal
+			;;
+
+		-info | -doc) 
+			awk '/DOCBEGIN/, /DOCEND/' $0 \
+						| sed -e 's/^#//' \
+						| sed -e '/DOCBEGIN/d' \
+						| sed -e '/DOCEND/d' \
+						| more
+			exit 0
+			;;
+
+		*) 
+			f_usage
+			ERRVAL=1
+			ERRMSG="Invalid option: $1.\n"
+			f_fatal
+			;;
+	esac
+done
+#
+###################################################################
+###################################################################
+# MAIN
+###################################################################
+###################################################################
+#
+if (( DEBUG ))
+then
+	set -x
+fi
+
+if (( $VERBOSE ))
+then
+	echo "Version of $0 is: $(awk -F: '/^#.*Version:/ {print $2}' $0\
+			| sed -e 's/ * //g')"
+fi
+
+f_prep
+
+#
+###################################################################
+# Running functions is selectable, f_runfunction does this checking
+# as to whether to run the function or not
+###################################################################
+#
+if [[ $LEVEL = b ]]
+then
+	f_runfunction f_hostname
+	f_runfunction f_domain
+	f_runfunction f_ostype
+	f_runfunction f_patch
+	f_runfunction f_model
+	f_runfunction f_arch
+	f_runfunction f_cputype
+	f_runfunction f_cpucount
+	f_runfunction f_cpuspeed
+	f_runfunction f_memory
+	f_runfunction f_sernum
+	f_runfunction f_hostid
+	f_runfunction f_firmware
+	f_runfunction f_pagesize
+	f_runfunction f_kerneltype
+	f_runfunction f_swap
+
+elif [[ $LEVEL = m ]]
+then
+	f_runfunction f_hostname
+	f_runfunction f_domain
+	f_runfunction f_ostype
+	f_runfunction f_patch
+	f_runfunction f_model
+	f_runfunction f_arch
+	f_runfunction f_cputype
+	f_runfunction f_cpucount
+	f_runfunction f_cpuspeed
+	f_runfunction f_memory
+	f_runfunction f_sernum
+	f_runfunction f_hostid
+	f_runfunction f_firmware
+	f_runfunction f_pagesize
+	f_runfunction f_kerneltype
+	f_runfunction f_swap
+	f_runfunction f_vip
+	f_runfunction f_nic
+	f_runfunction f_hba
+	f_runfunction f_hba_spec
+	f_runfunction f_raid
+	f_runfunction f_emc
+	f_runfunction f_disks
+	f_runfunction f_disks_total_size
+
+else
+	f_runfunction f_hostname
+	f_runfunction f_domain
+	f_runfunction f_ostype
+	f_runfunction f_patch
+	f_runfunction f_model
+	f_runfunction f_arch
+	f_runfunction f_cputype
+	f_runfunction f_cpucount
+	f_runfunction f_cpuspeed
+	f_runfunction f_memory
+	f_runfunction f_sernum
+	f_runfunction f_hostid
+	f_runfunction f_firmware
+	f_runfunction f_pagesize
+	f_runfunction f_kerneltype
+	f_runfunction f_swap
+	f_runfunction f_vip
+	f_runfunction f_nic
+	f_runfunction f_hba
+	f_runfunction f_hba_spec
+	f_runfunction f_raid
+	f_runfunction f_emc
+	f_runfunction f_disks
+	f_runfunction f_disks_total_size
+	f_runfunction f_dbms
+	f_runfunction f_oracle_rac
+	f_runfunction f_asm
+	f_runfunction f_clustered
+	f_runfunction f_veritas
+	f_runfunction f_software
+	f_runfunction f_automation
+	f_runfunction f_linuxvirt
+	f_runfunction f_hpvirtual
+	f_runfunction f_vgs
+	f_runfunction f_vgs_sanonly
+	f_runfunction f_vgs_extendable_auto
+	f_runfunction f_vgs_extendable_raw
+	f_runfunction f_stats
+	f_runfunction f_security
+	f_runfunction f_perfprofile
+	f_runfunction f_centrify
+	f_runfunction f_companyinfo
+	f_runfunction f_console
+fi
+#
+f_post
+#
+###################################################################
+if (( $SINGLE_LINE_OUTPUT ))
+then
+	f_myprint_singleline
+fi

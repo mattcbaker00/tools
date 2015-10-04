@@ -1,0 +1,1560 @@
+#!/bin/sh
+
+################################################################################
+#DOCBEGIN
+#
+# Get diskmapping for a device
+#
+# Works on: Linux (Redhat/RHEL)
+#
+#
+# Can take as command args a list of  disks (/dev/sda, /dev/sdb, ...).
+# Can read an input file of disks           (/dev/sda, /dev/sdb, ...).
+# Otherwise it will function on all /dev/sd* devices.
+#
+# Output will be similar to this:
+#
+#   DISK
+#   DM number
+#   Mapper device and pairs
+#   VG  
+#   LV    
+#   SIZE
+#   TYPE
+#
+#   IF LONG OUTPUT
+#       Part
+#       UUID
+#       WWN
+#       LUNID
+#       ARRAY
+#       MAJOR,MINOR & SCSI path/controllers
+#       INFO 
+#
+#
+# EXAMPLES ONLY  - may not be totally update w/ each mod - don't code against
+#                  these examples listed here, run the current command to see
+#
+#  diskmap
+#
+#  DISK      :DM      :MAPPER    :PAIRS       :VG                       :LV
+#        :    SIZE:  TYPE
+#
+#  /dev/sda  :dm-2    :mpathb    :sdbl        :vgorapd001pfhfmp08 :lvora_FHFM8
+#        : 210.2GB:   EMC
+#
+#  /dev/sdaa :dm-55   :mpathab   :sdcl        :vgorapd001pfhfmp11 :lvora_FHFM11
+#        : 210.2GB:   EMC
+#
+#
+#  diskmap -l 
+#
+#  DISK      :DM      :MAPPER    :PAIRS       :VG                       :LV 
+#      :SIZE:  TYPE:PART:LUNID:ARRAYS              :INFO    :UUID :WWN 
+#      :MAJMIN-SCSI 
+#
+#  /dev/sda  :dm-2    :mpathb    :sdbl        :vgorapd001pfhfmp08 :lvora_FHFM8
+#      : 210.2GB:   EMC:1   :741  :34 :data :2JBdez-sxwq-UZDn-wyuc-jZOe-0wZ7\
+#       -NexAQe :360000970000192605934533035373431  :8,0 0_0_0_1: dev8:1 dev21:1 dev21:3
+#
+#  /dev/sdaa :dm-55   :mpathab   :sdcl        :vgorapd001pfhfmp11 :lvora_FHFM11
+#      : 210.2GB:   EMC:1   :75B  :34 :data    :wY1f1B-Rvf7-qFRZ-jYFl-T4bW-\
+#      7fBx-LRHtyZ :360000970000192605934533035373542  :65,160 0_0_0_27: dev8:16 dev20:1 dev20:2
+#
+#
+#
+# Also can "translate" and individual "dm", "dev", "sd"  "mpath" device by using "-t ARG"
+#
+#  CMD: diskmap -t dm-10
+#    OUT: dm-10 == mpathk sdk,sdbv
+#
+#  CMD: diskmap -t mpathk
+#    OUT: mpathk == dm-10 sdk,sdbv
+#
+#  CMD: diskmap -t sdk
+#    OUT: sdk == mpathk dm-10 sdk,sdbv
+#
+# BUGS: 
+#      doesn't know about s/w md RAID (mdadm) devices as in: /dev/md0
+#
+#      originally used mpathX, but that can be overridden by aliases in multipath.conf
+#         changed to now look for this patter, but instead "dm-", hopefully this
+#         doesn't introduce more issues...
+#
+#      focused on Redhat, but should work elsewhere?  (tested on Suse to some degree)
+#
+# Written by Matt Baker mbaker@computeranddata.com
+# Version: 2015.09.28.0001
+#
+#DOCEND
+#
+################################################################################
+#
+# $Log: diskmap,v $
+# Revision 1.7  2015/10/02 15:36:16  jbakerm1
+# fixed bug in MYMPATH by now getting only the last item in the list
+#
+# Revision 1.6  2015/10/02 02:59:01  jbakerm1
+# fixed bug in getting LABEL
+#
+# Revision 1.5  2015/10/02 02:47:23  jbakerm1
+# added better test for sd disk that isn't in LVM
+#
+# Revision 1.4  2015/09/26 01:08:14  jbakerm1
+# added new functions and test for mpath partioned disks for ASM
+#
+# Revision 1.3  2015/09/19 00:10:56  jbakerm1
+# added devX-Y mappings
+# big addition
+#
+# Revision 1.2  2015/09/16 21:30:31  jbakerm1
+# changes for multipath aliases (mpathX dosesn't work for these configs).
+#
+# Revision 1.1  2015/09/10 20:07:14  jbakerm1
+# Initial revision
+#
+################################################################################
+
+# run trap so if user exists, it cleans up processes
+trap 'f_post;exit 2' 1 2 3 15
+
+#######################################
+# Get the right shell for Linux versus all others
+#######################################
+if [ -z $MYSHELL 2> /dev/null ]
+then
+	export MYSHELL
+	MYSHELL=setnow
+	CMD=$0
+	if [ `uname` = "Linux" ]
+	then
+		exec /bin/bash $CMD "$@"
+	else
+		exec /bin/ksh  $CMD "$@"
+	fi
+fi
+
+DEBUG=0
+VERBOSE=0
+HEADERPRINTED=1
+LONG=0
+PRINTHEADER=1
+
+MULTIPATHCONF=/etc/multipath.conf
+#MULTIPATHPAT=mpath
+MULTIPATHPAT="dm-"
+
+TRANSLATE=""
+MYINPUTFILE=""
+
+SUPPORTED_OS_TYPES="Linux" 
+PATH=$PATH:/usr/sbin:/sbin
+OSTYPE=$(uname)
+
+#######################################
+
+#######################################
+# Functions
+#######################################
+
+f_usage()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+cat << EOF
+
+Usage: $0 [-v] [-debug] [-version] | [-help] | [-doc | -info]
+
+           [-f  disklistfile] [-noheader] [-l]
+                    disklistfile:
+                        /dev/sdx
+                        /dev/sdy
+                        ...
+
+           [-t [dm-X | mpathX | sdX | devX-Y]
+
+           Default    $0
+           Verbose    $0 -v
+           Noheader   $0 -noheader
+           Long/full  $0 -l             #long/full listing
+           Translate  $0 -t dm-20
+           Translate  $0 -t mpathb
+           Translate  $0 -t sdab
+           Translate  $0 -t dev8:3
+           Inputfile  $0 -f /some/file
+           Debug      $0 -debug
+
+EOF
+}
+
+##############
+f_fatal()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if [[ -w $LOGFILE_COMP ]]
+	then
+		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " \
+			| tee -a $LOGFILE_COMP
+	else
+		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " 
+	fi
+	exit $ERRVAL
+}
+
+#############
+#Verify user
+#
+if [[ $(whoami) != root ]]
+then
+	ERRVAL=3
+	ERRMSG="Must be root user."
+	f_fatal
+fi
+
+##############
+f_myprint()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	HEADERSHORT="DISK DM MAPPER PAIRS VG LV SIZE TYPE DMPART MPATHPART LABEL "
+	PRTHEADERSHORT="%-10s:%-12s:%-18s:%-15s:%-20s:%-30s:%12s:%-5s:%-8s:%-10s:%-15s"
+	HEADERLONG="$HEADERSHORT PART LUNID ARRAYS INFO UUID WWN MAJMIN-SCSI ASSOC-sar-devs" 
+	PRTHEADERLONG="$PRTHEADERSHORT:%4s:%12s:%-25s:%-10s:%-40s:%-35s:%-20s:%-30s"
+
+	#Print the header with the output?
+	if (( $PRINTHEADER && $HEADERPRINTED ))
+	then
+		#print the header, if desired, but only print once 
+		#and not on each loop interation
+		HEADERPRINTED=0
+
+		if (( $LONG ))
+		then
+			printf "$PRTHEADERLONG \n" $HEADERLONG
+		else
+			printf "$PRTHEADERSHORT \n" $HEADERSHORT
+		fi
+	fi
+
+	if (( $LONG ))
+	then
+		printf "$PRTHEADERLONG \n" \
+					"$MYDISK" "$MYDM" "$MYMAPPER" "$MYMAPPERPAIRS" \
+					"$MYVG" "$MYLV" "$MYSIZE" "$MYTYPE"  \
+					"$MYDMPART" "$MYMPATHPART" "$MYLABEL" \
+					"$MYPART" "$MYLUNID" "$MYARRAYS" "$MYINFO" \
+					"$MYUUID" "$MYWWN" "$MYMM" "$MYSARDEV"
+	else
+		printf "$PRTHEADERSHORT \n" \
+					"$MYDISK" "$MYDM" "$MYMAPPER" "$MYMAPPERPAIRS" \
+					"$MYVG" "$MYLV" "$MYSIZE" "$MYTYPE" \
+					"$MYDMPART" "$MYMPATHPART" "$MYLABEL"
+	fi
+}
+
+##############
+f_prep()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_prep "
+	fi
+	#######################################
+	# See if supported OS
+	#######################################
+	if [[ -z $(echo $SUPPORTED_OS_TYPES | grep -i $(uname)) ]]
+	then
+		ERRVAL=30
+		ERRMSG="ERROR:30:Unsupported OS type - $(uname) \n"
+		f_fatal
+	fi
+
+	#######################################
+	# See if supported Linux
+	#######################################
+	#Red Hat
+	if [[ -e /usr/bin/lsb_release ]]
+	then
+		if [[ -z $(lsb_release -sd | egrep -ie 'Enterprise|Red|SUSE|SLES') ]]
+		then
+			ERRVAL=31
+			ERRMSG="ERROR:31:Unsupported Linux flavor type - $(lsb_release -sd) \n"
+			f_fatal
+		elif [[ -z $(cat /etc/*release 2> /dev/null | egrep -ie 'Enterprise|Red|SUSE|SLES') ]]
+		then
+			ERRVAL=32
+			ERRMSG="ERROR:32:Unsupported Linux flavor.\n"
+			f_fatal
+		fi
+	else	
+		MYFILE1=/etc/SuSE-release
+		MYFILE2=/etc/redhat-release
+		if [[ ! -f $MYFILE1 && ! -f $MYFILE2 ]]
+		then
+			ERRVAL=33
+			ERRMSG="ERROR:33:Unsupported Linux flavor type - not Red Hat \n"
+			f_fatal
+		fi
+	fi
+
+	#
+	# pvs
+	#
+	MYPVSFILE=/tmp/pvs.$$
+	MYCMD=pvs
+	if (( $VERBOSE ))
+	then
+		echo "INFO: === Give us some time. Doing a $MYCMD ==="
+	fi
+	$MYCMD 2> /dev/null > $MYPVSFILE
+
+	#
+	# syminq
+	#
+	if [[ -d /usr/symcli/bin ]]
+	then
+		SYMDIR=/usr/symcli/bin
+	elif [[ -d /opt/emc/SYMCLI/bin ]]
+	then
+		SYMDIR=/opt/emc/SYMCLI/bin
+	elif [[ -n $(ls /usr/symcli/*/bin 2> /dev/null) ]]
+	then
+		#
+		#Check for symcli w/ version, take the last/highest numbered version
+		#
+		SYMDIR=$(ls /usr/symcli/*/bin 2> /dev/null | sed -n \$p)
+	elif [[ -n $(ls /opt/emc/SYMCLI/*/bin 2> /dev/null) ]]
+	then
+		#
+		#Check for symcli w/ version, take the last/highest numbered version
+		#
+		SYMDIR=$(ls /opt/emc/SYMCLI/*/bin 2> /dev/null | sed -n \$p)
+	else
+		SYMDIR=""
+	fi
+	#
+	if [[ -n $SYMDIR ]]
+	then
+		MYSYMINQFILE=/tmp/syminq.$$
+		MYCMD=$SYMDIR/syminq
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		$MYCMD 2> /dev/null > $MYSYMINQFILE
+
+
+		MYSYMINQCLARFILE=/tmp/syminqclar.$$
+		MYCMD="$SYMDIR/syminq -clariion -v"
+		if (( $VERBOSE ))
+		then
+			echo "INFO: === Give us some time. Doing a $MYCMD ==="
+		fi
+		$MYCMD 2> /dev/null > $MYSYMINQCLARFILE
+	fi
+
+	#
+	# get config data 
+	#
+	#MYCMD=dmidecode
+	#if (( $VERBOSE ))
+	#then
+	#	echo "INFO: === Give us some time. Doing a $MYCMD ==="
+	#fi
+	## overwrite each time, so it is fresh
+	#$MYCMD > $SYSCONFFILE 2> /dev/null
+}
+
+##########################################
+# start of info gathering functions
+##########################################
+
+##############
+f_dm()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_dm"
+	fi
+
+	MYDM=""
+
+	#
+	# this should cover the vast majority of sd device's mappings
+	#
+	if [[ -f /sbin/multipath ]]
+	then
+		MYDM="$(multipath -ll 2> /dev/null \
+						| grep -B9 -w $MYSHORTDISK \
+						| awk "/$MULTIPATHPAT/ {print \$3}" \
+						| sed -n \$p)"
+	fi
+
+	#
+	#------------------------------------------------------
+	# try many ways to find the mappings for this sd device
+	#------------------------------------------------------
+	#
+	# sd device hidden in a vg?
+	#
+	if [[ -z $MYDM ]]
+	then
+		MYTEMPVG="$(grep -w $MYDISK $MYPVSFILE \
+					| awk '{print $2}')"
+
+		if [[ $MYTEMPVG = lvm2 ]]
+		then
+			#no VG found
+			MYTEMPVG=""
+		fi
+
+		if [[ -n $MYTEMPVG ]]
+		then
+			#assume it'll find matches, maybe not a good assumption
+			FOUND=""
+			FOUND=$(ls -l /dev/disk/by-id 2> /dev/null \
+							| grep -w $MYTEMPVG \
+							| awk -Fdm-name- '{print $2}' \
+							| awk '{print $1}'\
+							| sed -e 's@-@/@')
+			if [[ -n $FOUND ]]
+			then
+				MYDM="vg-sd"
+			fi
+		fi
+	fi
+	#----------------
+	#
+	# swap?
+	#
+	if [[ -z $MYDM ]]
+	then
+		MYLOOP="$(swapon -s 2> /dev/null \
+					| grep dm- \
+					| awk '{print $1}' \
+					| cut -c 6- \
+					| tr '\012' ' ')"
+		if [[ -n $MYLOOP ]]
+		then
+			for MYTEMPDM in $MYLOOP
+			do
+				MYTEMPNAME=$""
+				MYTEMPNAME=$(ls -l /dev/disk/by-id 2> /dev/null \
+								| grep -w $MYTEMPDM \
+								| awk -Fdm-name- '{print $2}' \
+								| awk '{print $1}'\
+								| sed -e 's@-@/@')
+				if [[ -n $MYTEMPNAME ]]
+				then
+					MYTEMPLV=$(lvdisplay -m $MYTEMPNAME 2> /dev/null \
+									| grep -w $MYDISK)
+					if [[ -n $MYTEMPLV ]]
+					then
+						MYDM="$MYTEMPDM"
+						break
+					fi
+				fi
+			done
+		fi
+	fi
+	#----------------
+	#
+	# mounted?
+	#
+	if [[ -z $MYDM ]]
+	then
+		MYTEMPVAR="$(df -hP \
+					| grep -w $MYDISK \
+					| awk '{print $NF}')"
+
+		if [[ -n $MYTEMPVAR ]]
+		then
+			MYDM="mounted-sd"
+		fi
+	fi
+
+	#------------------------------------------------------
+
+	if [[ -z $MYDM ]]
+	then
+		MYDM="not-found"
+	fi
+}
+
+##############
+f_mapper()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_mapper"
+	fi
+
+	if [[ -f /sbin/powermt ]]
+	then
+		MYMAPPER="$(powermt display dev=$MYSHORTDISK 2> /dev/null \
+						| awk -F= '/Pseudo name/ {print $2}')"
+	
+		if [[ -n $MYMAPPER ]]
+		then
+			MYMAPPERPAIRS="$(powermt display dev=$MYSHORTDISK 2> /dev/null \
+							| awk '/sd/ {print $3}' \
+							| grep -vw $MYSHORTDISK \
+							| tr '\012' ',' \
+							| sed -e 's/,$//')"
+
+			if [[ -z $MYMAPPERPAIRS ]]
+			then
+				MYMAPPERPAIRS="none"
+			fi
+		else
+			MYMAPPER="not-found"
+			MYMAPPERPAIRS="none"
+		fi
+	elif [[ -f /sbin/multipath ]]
+	then
+		MYMAPPER="$(multipath -ll 2> /dev/null \
+						| grep -B7 -w $MYSHORTDISK \
+						| awk "/$MULTIPATHPAT/ {print \$1}" \
+						| sed -n \$p)"
+
+		if [[ -n $MYMAPPER ]]
+		then
+			MYMAPPERPAIRS="$(multipath -ll $MYMAPPER 2> /dev/null \
+							| cut -c6- \
+							| awk '/sd/ {print $2}' \
+							| grep -vw $MYSHORTDISK \
+							| tr '\012' ',' \
+							| sed -e 's/,$//')"
+
+			if [[ -z $MYMAPPERPAIRS ]]
+			then
+				MYMAPPERPAIRS="none"
+			fi
+		else
+				MYMAPPER="not-found"
+				MYMAPPERPAIRS="none"
+		fi
+	else
+		MYMAPPER="not-found"
+		MYMAPPERPAIRS="none"
+	fi
+}
+
+f_mp_partitions()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_mp_partitions"
+	fi
+	MYDMPART=""
+	MYMPATHPART=""
+
+	if [[ -f /sbin/multipath ]]
+	then
+		#BUT, if we have ASM for instance, we have a partitioned
+		#multipath device, and the sd and "first level" dm don't
+		#show what is underneath, for instance:
+		#
+		#  either mpathX1 or mpathX_part1  (looking for a suffix of 1)
+		#
+		#lsblk /dev/sdbx
+		#sdbx                    68:176     0     5G  0 disk  
+		#   mpathg (dm-2)        253:2      0     5G  0 mpath 
+		#     mpathgp1 (dm-15)   253:15     0     5G  0 part  
+		#
+
+		MYDMPART=$(lsblk --list $MYDISK \
+						| sed -e 1d \
+						| grep -vw $MYSHORTDISK \
+						| grep -w part \
+						| awk '{print $2}' \
+						| grep -v : \
+						| sed -e 's/[()]//g')
+
+		MYMPATHPART=$(lsblk --list $MYDISK \
+						| sed -e 1d \
+						| grep -vw $MYSHORTDISK \
+						| grep -w part \
+						| awk '{print $1}' \
+						| tr '\012' ',' \
+						| sed -e 's/,$//')
+
+	fi
+
+	if [[ -z $MYDMPART ]]
+	then
+		MYDMPART="no-part"
+	fi
+
+	if [[ -z $MYMPATHPART ]]
+	then
+		MYMPATHPART="no-part"
+	fi
+}
+
+f_vg()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_vg"
+	fi
+
+	MYVG=""
+
+	#Needs MYMAPPER var from f_mapper
+	if [[ $MYMAPPER != not-found ]]
+	then
+		MYVG="$(grep -w $MYMAPPER $MYPVSFILE \
+					| awk '{print $2}')"
+
+		if [[ $MYVG = lvm2 ]]
+		then
+			MYVG="lvm2-nonVG-or-swap"
+		fi
+	fi
+
+	#try w/ pvs - non-mapper
+	if [[ -z $MYVG ]]
+	then
+		MYVG="$(grep -w $MYDISK $MYPVSFILE \
+					| awk '{print $2}')"
+	fi
+
+	if [[ -z $MYVG ]]
+	then
+		MYVG="not-found"
+	fi
+}
+
+##############
+f_lv()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_lv"
+	fi
+
+	MYLV=""
+
+	#Needs MYMAPPER var from f_mapper
+	if [[ $MYMAPPER != not-found ]]
+	then
+		MYLV="$(pvdisplay -m /dev/mapper/$MYMAPPER 2> /dev/null \
+					| awk '/Logical volume/ {print $3}' \
+					| awk -F/ '{print $NF}' \
+					| sort -u \
+					| tr '\012' ',' \
+					| sed -e 's/,$//')"
+	fi
+
+	#try w/ lvs - non-mapper
+	if [[ -z $MYLV ]]
+	then
+		#MYLV="$(pvdisplay -m /dev/$MYDISK 2> /dev/null \
+		MYLV="$(pvdisplay -m $MYDISK 2> /dev/null \
+					| awk '/Logical volume/ {print $3}' \
+					| awk -F/ '{print $NF}' \
+					| sort -u \
+					| tr '\012' ',' \
+					| sed -e 's/,$//')"
+	fi
+
+	if [[ -z $MYLV ]]
+	then
+		MYLV="not-found"
+	fi
+}
+
+##############
+f_size()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_size"
+	fi
+
+	MYSIZE="$(fdisk -lu $MYDISK 2> /dev/null \
+				| grep -w $MYDISK \
+				| awk -F: '{print $2}' \
+				| awk -F, '{print $1}' \
+				| sed -e 's/ * //g')"
+}
+
+##############
+f_type()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_type"
+	fi
+
+	MYTYPE=""
+	#
+	# some possible output: HP, EMC, IBM, DGC (Clariion), HDS, ....
+	#
+	if [[ -e /usr/bin/lsscsi ]]
+	then
+		MYTYPE="$(/usr/bin/lsscsi 2> /dev/null \
+				| grep -w $MYNONPARTDISK \
+				| awk '{print $3}')"
+
+	elif [[ -f /sbin/blkid ]]
+	then
+		if [[ $MYDMPART = no-part ]]
+		then
+			MYTYPE="$(/sbin/blkid -s TYPE -o value /dev/$MYDM)"
+		else
+			MYTYPE="$(/sbin/blkid -s TYPE -o value /dev/$MYDMPART)"
+		fi
+
+	elif [[ -f /lib/udev/scsi_id ]]
+	then
+		MYTYPE="$(/lib/udev/scsi_id --page=0x80 \
+								--whitelisted --device=$MYNONPARTDISK \
+						| awk '{print $1}' \
+						| cut -c2-)"
+
+	elif [[ -e /sbin/smartctl ]]
+	then
+		MYTYPE="$(/usr/sbin/smartctl -d auto -a -i $MYNONPARTDISK 2> /dev/null \
+				| awk -F: '/Vendor:/ {print $2}')"
+
+		#else
+		#	MYTYPE="$(cat /proc/scsi/scsi \
+		#			| grep -iv "cd/dvd" \
+		#			| grep -iv "cdr" \
+		#			| awk '/Vendor:/ {print $2}'\
+		#			| sort -u )"
+	fi
+}
+
+
+##############
+f_label()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_label"
+	fi
+	#----------------
+	#
+	# ASM or other LABEL
+	#
+	MYLABEL=""
+	if [[ -f /sbin/blkid ]]
+	then
+		#should work, but not always for ASM
+		if [[ $MYDMPART = no-part ]]
+		then
+			MYLABEL="$(/sbin/blkid -s LABEL -o value /dev/$MYDM)"
+		else
+			MYLABEL="$(/sbin/blkid -s LABEL -o value /dev/$MYDMPART)"
+			#
+			# see if ASMlib is there
+			#
+			if [[ /etc/init.d/oracleasm && -n $MYLABEL ]]
+			then
+				MYTEMP=""
+				MYTEMP=$(/etc/init.d/oracleasm querydisk -p /dev/$MYDMPART \
+							2> /dev/null \
+							| sed -e 's/"//g' \
+							| grep -w $MYLABEL)
+				if [[ -n $MYTEMP ]]
+				then
+					MYLABEL="ASM-DISK $MYLABEL"
+				fi
+			fi
+		fi
+
+		if [[ -z $MYLABEL ]]
+		then
+			if [[ -d /dev/disk/by-label ]]
+			then
+				MYLABEL="$(ls -l /dev/disk/by-label 2> /dev/null \
+						| grep -w $MYDM \
+						| awk -F- '{print $1}' \
+						| awk '{print $NF}' )"
+			fi
+
+			if [[ -z $MYLABEL ]]
+			then
+				if [[ $MYDMPART = no-part ]]
+				then
+					MYLABEL="$(/sbin/blkid -s LABEL -o value /dev/$MYDM)"
+				else
+					MYLABEL="$(/sbin/blkid -s LABEL -o value /dev/$MYDMPART)"
+				fi
+			fi
+		fi
+
+		if [[ -z $MYLABEL ]]
+		then
+			MYLABEL="unknown"
+		fi
+	else
+		MYLABEL="unknown"
+	fi
+}
+
+##############
+f_majmin()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_majmin"
+	fi
+
+	MAJORMINOR="$(ls -l $MYDISK | awk '{print $5""$6}')"
+
+	if [[ -e /usr/bin/lsscsi ]]
+	then
+		SCSIPATH="$(/usr/bin/lsscsi 2> /dev/null \
+				| grep -w $MYDISK \
+				| awk '{print $1}'\
+				| sed -e 's/\[//g;s/\]//g' \
+				| sed -e 's/:/_/g')"
+	else
+		SCSIPATH="unknown"
+	fi
+
+	MYMM="$MAJORMINOR $SCSIPATH"
+
+	if [[ -z $MYMM ]]
+	then
+		MYMM="not-found"
+	fi
+}
+
+##############
+f_part()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_part"
+	fi
+
+	MYPART="$(fdisk -lu $MYDISK 2> /dev/null \
+				| grep -c $MYDISK)"
+
+	if [[ -z $MYPART ]]
+	then
+		MYPART="not-found"
+	fi
+}
+
+##############
+f_uuid()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_uuid"
+	fi
+
+	MYUUID=""
+	if [[ $MYDMPART = no-part ]]
+	then
+		#try the SD
+		MYUUID="$(blkid -o full 2> /dev/null \
+						| grep -w $MYDISK \
+						| awk '{print $2}'\
+						| awk -F= '{print $2}'\
+						| sed -e 's/\"//g')"
+	else
+		#try the SDx1
+		MYTYPE="$(blkid -o full 2> /dev/null \
+						| grep -w $MYDMPART \
+						| awk '{print $2}'\
+						| awk -F= '{print $2}'\
+						| sed -e 's/\"//g')"
+	fi
+
+	if [[ -z $MYUUID ]]
+	then
+		#try the DM
+		MYUUID="$(blkid -o full 2> /dev/null \
+						| grep -w $MYDM \
+						| awk '{print $2}'\
+						| awk -F= '{print $2}' \
+						| sed -e 's/\"//g')"
+	fi
+
+	if [[ -z $MYUUID ]]
+	then
+		#disk device   (not LVM)
+		MYUUID="$(ls -l /dev/disk/by-uuid 2> /dev/null \
+						| grep -w $MYDM \
+						| sed -e 's/\"//g')"
+	fi
+
+	if [[ -z $MYUUID ]]
+	then
+		MYUUID="not-found"
+	fi
+
+}
+
+##############
+f_wwn()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_wwn"
+	fi
+
+	if [[ -f /lib/udev/scsi_id ]]
+	then
+		MYWWN="$(/lib/udev/scsi_id --page=0x83 --whitelisted --device=$MYDISK)"
+	else
+		MYWWN=""
+	fi
+
+	if [[ -z $MYWWN ]]
+	then
+		if [[ -f /sbin/multipath ]]
+		then
+			MYWWN="$(multipath -ll $MYDISK 2> /dev/null \
+						| awk "/$MULTIPATHPAT/ {print \$2}" \
+						| sed -e 's/(//;s/)//' )"
+		else
+			MYWWN="not-found"
+		fi
+	fi
+	if [[ -z $MYWWN ]]
+	then
+		MYWWN="$(blkid -o full 2> /dev/null \
+						| grep -w $MYDM \
+						| awk '{print $2}'\
+						| awk -F= '{print $2}' \
+						| sed -e 's/\"//g' )"
+	fi
+
+	if [[ -z $MYWWN ]]
+	then
+		MYWWN="not-found"
+	fi
+}
+
+##############
+f_lunid()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_lunid"
+	fi
+
+	if [[ $MYTYPE = EMC ]]
+	then
+		if [[ -s $MYSYMINQFILE ]]
+		then
+			MYLUNID="$(grep -w $MYDISK $MYSYMINQFILE \
+						| sed -e 's/M(.*)/    /g' \
+						| sed -e 's/GK/    /g' \
+						| awk '{print $5}' \
+						| cut -c4-7 )"
+						#| cut -c1-2,5-7 )"
+
+			if [[ -z $MYLUNID ]]
+			then
+				MYLUNID="no_EMC_ID"
+			fi
+		else
+			MYLUNID="unknown-no-symcli"
+		fi
+	else
+		MYLUNID="not-found"
+	fi
+}
+
+##############
+f_arrays()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_arrays"
+	fi
+
+	if [[ $MYTYPE = EMC ]]
+	then
+		if [[ -s $MYSYMINQFILE ]]
+		then
+			OUTPUTSYMM="$(grep EMC $MYSYMINQFILE \
+						| sed -e 's/M(.*)/    /g' \
+						| sed -e 's/GK/    /g' \
+						| awk '{print $5}' \
+						| cut -c1-2 \
+						| sort -u)"
+			OUTPUTCLAR="$(awk -F: '/Clariion ID/ {print $2}' $MYSYMINQCLARFILE \
+						| sort -u)"
+			MYARRAYS="$OUTPUTSYMM $OUTPUTCLAR"
+			if [[ -z $MYLUNID ]]
+			then
+				MYARRAYS="no_EMC_ARRAYS"
+			fi
+		else
+			MYARRAYS="unknown-no-symcli"
+		fi
+	else
+		MYARRAYS="not-found"
+	fi
+}
+
+##############
+f_info()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_info"
+	fi
+
+	MYINFO=""
+
+	#
+	# is it SWAP???
+	#
+	SWAPDISKS=$(swapon -s | awk '/^\/dev/ {print $1}')
+	if [[ -n $(echo $SWAPDISKS | egrep -w "$MYDISK|$MYDM|$MYMAPPER") ]]
+	then
+		MYINFO="swap"
+	fi
+
+	#
+	# is it boot???
+	#
+	if [[ -z $MYINFO ]]
+	then
+		MYINFO="$(df -hP /boot 2> /dev/null \
+						| awk '{print $1}'\
+						| grep -w $MYDISK)"
+		if [[ -n $MYINFO ]]
+		then
+			MYINFO="boot"
+		fi
+	fi
+
+	#
+	# is it root???
+	#
+	if [[ -z $MYINFO ]]
+	then
+		MYINFO="$(df -hP / 2> /dev/null \
+						| awk '{print $1}'\
+						| grep -w $MYDISK)"
+		if [[ -n $MYINFO ]]
+		then
+			MYINFO="root"
+		fi
+	fi
+
+	#
+	# default, but maybe not the best assumption
+	#
+	if [[ -z $MYINFO ]]
+	then
+		MYINFO="data"
+	fi
+}
+
+
+##############
+f_sardev()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_sardev"
+	fi
+
+	MYLSBLKFILE=/tmp/lsblk.$$
+	lsblk -r > $MYLSBLKFILE
+
+	#get the current SD device, mapper disk, the VG/LV
+	MYTEMPSD=""
+	MYTEMPSD="$(grep -w $MYSHORTDISK $MYLSBLKFILE \
+			| awk '{print $2}' \
+			| sed -e 's/:/-/' \
+			| sed -n 1p)"
+
+	if [[ -z $MYTEMPSD ]]
+	then
+		MYTEMPSD="SD-unknown"
+	else
+		#this is the device name the sar command uses ouptput: dev##-##
+		#add the "dev" to the maj-min numbers of the SD
+		#we are taking the maj:min of the SD and making the dev##-## name
+		MYTEMPSD="dev${MYTEMPSD}"
+	fi
+
+	MYTEMPMAPPER=""
+	MYTEMPMAPPER="$(grep -w $MYMAPPER $MYLSBLKFILE \
+			| awk '{print $3}' \
+			| sed -e 's/:/-/' \
+			| sed -n 1p)"
+
+	if [[ -z $MYTEMPMAPPER ]]
+	then
+		MYTEMPMAPPER="MAPPER-unknown"
+	else
+		MYTEMPMAPPER="dev${MYTEMPMAPPER}"
+	fi
+
+	MYTEMPLV=""
+	if [[ -n $(echo $MYLV | grep ,) ]]
+	then
+		for MYLVLOOP in $(echo $MYLV | sed -e 's/,/ /g')
+		do
+			MYTEMPLV="$MYTEMPLV $(grep -w $MYVG-$MYLVLOOP $MYLSBLKFILE \
+					| awk '{print $3}' \
+					| sed -e 's/:/-/' \
+					| sed -n 1p)"
+		done
+		if [[ -z $MYTEMPLV ]]
+		then
+			MYTEMPLV="LV-unknown"
+		else
+			MYTEMPLV="$(echo ${MYTEMPLV} | sed -e 's/^/dev/; s/ / dev/g')"
+		fi
+	else
+		MYTEMPLV="$(grep -w $MYVG-$MYLV $MYLSBLKFILE \
+				| awk '{print $3}' \
+				| sed -e 's/:/-/' \
+				| sed -n 1p)"
+		if [[ -z $MYTEMPLV ]]
+		then
+			MYTEMPLV="LV-unknown"
+		else
+			MYTEMPLV="dev${MYTEMPLV}"
+		fi
+	fi
+
+	MYSARDEV="$MYTEMPSD $MYTEMPMAPPER $MYTEMPLV"
+
+	rm $MYLSBLKFILE
+}
+
+##############
+f_disks()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_disks"
+	fi
+
+	#######################################
+	for MYDISK in $MYDISKS
+	do
+		#echo -n "$MYDISK..."
+
+		MYSHORTDISK=$(basename $MYDISK)
+		MYNONPARTDISK=$(basename $MYDISK | sed -e 's/[0-9]//g')
+		#
+		# keep functions in the order as listed, as some functions 
+		# depend on variables being set from previous functions
+		#
+		f_size
+		f_type
+		f_majmin
+		f_dm
+		f_mapper
+		f_mp_partitions
+		f_label  #Dependency: MYMAPPER from f_mapper, f_mp_partitions
+		f_vg     #Dependency: MYMAPPER from f_mapper
+		f_lv     #Dependency: MYMAPPER from f_mapper
+
+		if (( $LONG ))
+		then
+			f_part
+			f_uuid
+			f_wwn
+			f_lunid
+			f_arrays
+			f_info
+			f_sardev
+		fi
+		f_myprint
+	done
+}
+
+##############
+f_translate()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+
+	if (( $VERBOSE )) 
+	then
+		echo "INFO: function f_translate"
+	fi
+
+	if [[ -n $(echo $TRANSLATE | grep ^dm) ]]
+	then
+		#DM device to:
+		MYINST=$(ls -l /dev/mapper \
+						| grep -w $TRANSLATE \
+						| awk '{print $(NF - 2)}')
+
+		MYSD="$(multipath -ll $MYINST 2> /dev/null \
+						| cut -c6- \
+						| awk '/sd/ {print $2}' \
+						| tr '\012' ',' \
+						| sed -e 's/,$//')"
+
+		if [[ -z $MYINST ]]
+		then
+			MYINST=unknown
+		fi
+		if [[ -z $MYSD ]]
+		then
+			MYSD=unknown
+		fi
+
+		echo "$TRANSLATE == $MYINST $MYSD "
+
+	elif [[ -n $(echo $TRANSLATE | grep ^dev) ]]
+	then
+		MYTEMPTRANSLATE=$(echo $TRANSLATE | sed -e 's/dev//;s/-/:/')
+		MYSD="$(lsblk -r \
+				| grep -w $MYTEMPTRANSLATE \
+				| awk '{print $1}' \
+				| sed -n 1p)"
+
+		echo "$TRANSLATE == $MYSD "
+
+	elif [[ -n $(echo $TRANSLATE | grep ^sd) ]]
+	then
+		#
+		# BUG: this does not look for a non-mapper device
+		#      like the main script does (f_dm)
+		#
+		#sd device to:
+		#MYTEMPDISK="echo $TRANSLATE | awk -F/ '{print $NF}'" 
+		MYTEMPDISK=$TRANSLATE
+
+		MYMAPPER="$(multipath -ll 2> /dev/null \
+						| grep -B9 -w $MYTEMPDISK \
+						| awk "/$MULTIPATHPAT/ {print \$1}" \
+						| sed -n \$p)"
+
+		#
+		#maybe it hasn't been LVM/pvcreated yet
+		#
+		if [[ -z $MYMAPPER ]]
+		then
+			MYMAPPER=unknown
+			MYIDM=unknown
+			MYSD=unknown
+		else
+			MYDM="$(multipath -ll $MYMAPPER 2> /dev/null \
+						| awk "/$MULTIPATHPAT/ {print \$3}")"
+
+			MYSD="$(multipath -ll $MYMAPPER 2> /dev/null \
+						| cut -c6- \
+						| awk '/sd/ {print $2}' \
+						| tr '\012' ',' \
+						| sed -e 's/,$//')"
+		fi
+
+		if [[ -z $MYDM ]]
+		then
+			MYIDM=unknown
+		fi
+		if [[ -z $MYMAPPER ]]
+		then
+			MYMAPPER=unknown
+		fi
+		if [[ -z $MYSD ]]
+		then
+			MYSD=unknown
+		fi
+
+		echo "$TRANSLATE == $MYMAPPER $MYDM $MYSD"
+
+		MYDISK=/dev/$TRANSLATE
+		MYSHORTDISK=$TRANSLATE
+		f_mp_partitions
+
+		if [[ $MYDMPART != no-part ]]
+		then
+			echo "$TRANSLATE == partitions: $MYDMPART $MYMPATHPART"
+		fi
+
+	else
+		#elif [[ -n $(echo $TRANSLATE | grep mpath) ]]
+		#then
+		#
+		#Since we can have multipath aliases, we let it drop here as there is no
+		#convention on what could be used.  There may be a better test, but I
+		#don't know of it yet.
+
+		#mpath device to:
+		MYINST=$(multipath -ll $TRANSLATE 2> /dev/null \
+						| awk '/dm-/ {print $3}')
+
+		MYSD="$(multipath -ll $TRANSLATE 2> /dev/null \
+						| cut -c6- \
+						| awk '/sd/ {print $2}' \
+						| tr '\012' ',' \
+						| sed -e 's/,$//')"
+
+		if [[ -z $MYINST ]]
+		then
+			MYINST=unknown
+		fi
+		if [[ -z $MYSD ]]
+		then
+			MYSD=unknown
+		fi
+
+		echo "$TRANSLATE == $MYINST $MYSD"
+	fi
+}
+
+##############
+f_post()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_post"
+	fi
+
+	if (( $VERBOSE ))
+	then
+		HEADER="$(basename $0)_version"
+		OUTPUT="$(grep -i "#.*VERSION:" $0 \
+							| sed -n 1p \
+							| awk '{print $3}')"
+		echo "$HEADER $OUTPUT"
+	fi
+
+	for RMFILE in $MYPVSFILE $MYSYMINQFILE $MYSYMINQCLARFILE
+	do
+		if [[ -f $RMFILE ]]
+		then
+			rm -f $RMFILE
+		fi
+	done
+}
+
+##############################################################################
+##############################################################################
+###############################  END FUNCTIONS ###############################
+##############################################################################
+##############################################################################
+
+#######################################
+# Parse input
+# 
+# Difficult to parse because of the exec
+# to handle ksh versus bash
+#######################################
+while (( $# ))
+do
+	case $1 in
+		-noheader)
+			shift
+			PRINTHEADER=0
+			;;
+
+		-f) 
+			shift
+			MYINPUTFILE=$1
+			shift
+			if [[ ! -s $MYINPUTFILE ]]
+			then
+				ERRVAL=12
+				ERRMSG="File is empty $MYINPUTFILE\n"
+				f_fatal
+			fi
+			;;
+
+		-t) 
+			shift
+			TRANSLATE=$1
+			shift
+			if [[ -z $(echo $TRANSLATE | egrep -e "dm|mpath|sd|dev") ]]
+			then
+				#maybe it is an alias
+				if [[ -z $(grep $TRANSLATE $MULTIPATHCONF) ]]
+				then
+					ERRVAL=15
+					ERRMSG="Invalid argument to translate\n"
+					f_fatal
+				fi
+			fi
+			;;
+
+		-l) 
+			LONG=1
+			shift
+			;;
+
+		-debug) 
+			DEBUG=1
+			set -x
+			shift
+			;;
+
+		-v) 
+			VERBOSE=1
+			shift
+			;;
+
+		-version) 
+			echo "$0: Version: $(grep -i "#.*VERSION:" $0 \
+							| sed -n 1p \
+							| awk '{print $3}' ) "
+			exit 0
+			;;
+
+		#help
+		-h*|--h*)
+			f_usage
+			ERRVAL=1
+			ERRMSG="Help getting syntax/usage.\n"
+			f_fatal
+			;;
+
+		-info | -doc) 
+			awk '/DOCBEGIN/, /DOCEND/' $0 \
+						| sed -e 's/^#//' \
+						| sed -e '/DOCBEGIN/d' \
+						| sed -e '/DOCEND/d' \
+						| more
+			exit 0
+			;;
+
+		*) 
+			f_usage
+			ERRVAL=1
+			ERRMSG="Invalid option: $1.\n"
+			f_fatal
+			;;
+	esac
+done
+
+#
+###################################################################
+###################################################################
+# MAIN
+###################################################################
+###################################################################
+#
+
+if (( DEBUG ))
+then
+	set -x
+fi
+
+if [[ -z $TRANSLATE ]]
+then
+	f_prep
+	
+	if [[ -n $MYINPUTFILE ]]
+	then
+		MYDISKS=$(grep -v ^# $MYINPUTFILE | sort -u)
+		if [[ -z $MYDISKS ]]
+		then
+			ERRVAL=12
+			ERRMSG="No disk entries found in $MYINPUTFILE."
+			f_fatal
+		fi
+	else
+		#assuming there WILL always be at least one sdX device
+		MYDISKS=$(ls /dev/sd*)
+	fi
+	#
+	# main calling functions, calls all other disktype functions
+	#
+	f_disks
+	
+	f_post
+else
+	f_translate
+fi
