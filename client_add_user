@@ -1,21 +1,30 @@
 #/usr/bin/ksh
-
 ################################################################################
+#DOCBEGIN
 #
 # Reads in an /etc/password style/layout input file.
 #
 # USERINPUTFILE
+#    #username:x:UID:GID:GECOS:HOME:SHELL
+#    #*HID*:username:x:UID:GID:GECOS:HOME:SHELL
 #    root:x:0:0:root Super User:/root:/bin/bash
 #    mbaker:x:500:500:Matt Baker:/home/mbaker:/bin/ksh
 #
+#    ## - user account - HID = human ID
+#    HID:mbaker:x:500:500:Matt Baker:/home/mbaker:/bin/ksh
+#
+#    ## - app account - NHID = NON-human ID
+#    NHID:oracle:x:UUUU:GGGG:NHID Oracle:/home/oracle:/bin/ksh
+#
 # GROUPINPUTFILE
-#    groupname:GID
+#    #groupname:GID
 #    techsup:1011     
 #    storage:682     
 #    monitor:683     
 #
-# If a group doesn't exist, and the group inputfile is given, or hardeded
-#    in this file, then the group is created.
+# If a group doesn't exist, and the group inputfile is given,
+#    then the group is created.
+# Use: -nogroupfile  arg if you don't want anything done for groups
 #
 # NOTE: Many flavors require the default group to exist before adding the
 #       username.
@@ -37,19 +46,44 @@
 #      be careful.
 #
 # Written by: Matt Baker   mbaker@computeranddata.com
-# Version: 2015.03.30.0001
-#          YYYY MM DD INTERATION
+# Version: 2018.01.09.0001
+#          YYYY.MM.DD.ITERATION
+#
+#DOCEND
+################################################################################
+#
+# $Log: client_add_user,v $
+# Revision 1.6  2018/01/09 20:58:31  jbakerm1
+# changed to 12 char passwords w/ a variable
+#
+# Revision 1.5  2016/07/23 15:17:44  jbakerm1
+# added better generic steps for Linux
+#
+# Revision 1.4  2016/04/01 19:08:32  jbakerm1
+# added a changepassword option to existing users if so desired
+#
+# Revision 1.3  2016/01/29 19:58:20  jbakerm1
+# fixed emaildomain var names
+#
+# Revision 1.2  2016/01/28 20:51:47  jbakerm1
+# fixed a few bugs from the last change
+#
+# Revision 1.1  2016/01/28 20:44:31  jbakerm1
+# Initial revision
+#
+#
 ################################################################################
 
 ################################################################################
 # VARIABLES
 ################################################################################
-MYEMAILDOMAIN=somedomain.com
+MYMAILDOMAIN=computeranddata.com
 #
 DEBUG=0
 VERBOSE=0
 PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH
 MYHOST=$(hostname)
+PASSLENGTH=12
 OSTYPE=$(uname)
 SUPOS="AIX HP-UX Linux SunOS"
 #
@@ -61,14 +95,16 @@ else
 fi
 LOGFILE=$LOGDIR/user_add_log.$(date +%Y%m%H%m)
 #
+NOGROUPFILE=0
 GENERIC=0
+RESETPASSWORDS=0
 GENUSERS="oracle"
 #GENUSERS="discadm oracle"
 #
-# overridden later, if given as CLI option
+# can be overridden later, if given as CLI option
 USERINPUTFILE=create_users
 #
-# overridden later, if given as CLI option
+# can be overridden later, if given as CLI option
 GROUPINPUTFILE=create_groups
 #
 #
@@ -104,9 +140,14 @@ f_usage()
 cat << EOF
 
 Usage: $0 [-v] [-debug] [-version]
-       [-u user-inputfile] 
-       [-g group-inputfile]
        [-generic] 
+       [-resetpasswords]     #whether existing or not, reset paswords
+       [-u user-inputfilename] 
+       [-g group-inputfilename] | [-nogroupfile]
+
+       Default file names (must have USERINPUTFILE, optional GROUPINPUTFILE):
+		    USERINPUTFILE=create_users
+		    GROUPINPUTFILE=create_groups
 
        $0 -help
        $0 [-doc|-info]
@@ -134,28 +175,58 @@ do
 			shift
 			if [[ -z $1 || $(echo $1 | cut -c1) = '-' ]]
 			then
-				echo "Missing filename argument to -g"
-				usage
-				exit 3
+				f_usage
+				ERRVAL=3
+				ERRMSG="Missing filename argument to -u"
+				f_fatal
 			fi
 			USERINPUTFILE=$1
 			shift
+
+			MYFILE=$USERINPUTFILE
+			if [[ ! -f $MYFILE ]]
+			then
+				f_usage
+				ERRVAL=4
+				ERRMSG="Missing file: $MYFILE"
+				f_fatal
+			fi
 			;;
 
 		-g) 
 			shift
 			if [[ -z $1 || $(echo $1 | cut -c1) = '-' ]]
 			then
-				echo "Missing filename argument to -g"
-				usage
-				exit 3
+				f_usage
+				ERRVAL=3
+				ERRMSG="Missing filename argument to -g"
+				f_fatal
 			fi
 			GROUPINPUTFILE=$1
 			shift
+
+			MYFILE=$GROUPINPUTFILE
+			if [[ ! -f $MYFILE ]]
+			then
+				f_usage
+				ERRVAL=4
+				ERRMSG="Missing file: $MYFILE"
+				f_fatal
+			fi
 			;;
 
-		-debug) 
+	   -nogroupfile)
+			NOGROUPFILE=1
+			shift
+			;;
+
+		-generic) 
 			GENERIC=1
+			shift
+			;;
+
+       -resetpasswords)
+			RESETPASSWORDS=1
 			shift
 			;;
 
@@ -179,10 +250,6 @@ do
 
 		#help
 		-h*|--h*)
-			f_usage
-			ERRVAL=1
-			ERRMSG="Help getting syntax/usage.\n"
-			f_fatal
 			;;
 
 		-info | -doc) 
@@ -213,29 +280,40 @@ then
 fi
 
 if [[ -z $(echo $SUPOS | grep -w $OSTYPE) ]]
-then
-	echo "ERROR:2:Unsupported OS $OSTYPE."
+mhen
 	echo "INFO: Supported OS flavors are: $SUPOS"
-	exit 2
+	ERRVAL=12
+	ERRMSG="ERROR:2:Unsupported OS $OSTYPE."
+	f_fatal
 fi
 
 if [[ $(whoami) != root ]]
 then
-	echo "ERROR:3:Must be root user"
-	exit 3
+	ERRVAL=13
+	ERRMSG="ERROR:3:Must be root user"
+	f_fatal
 fi
 
-for MYTESTFILE in $USERINPUTFILE $GROUPINPUTFILE 
+if (( $NOGROUPFILE ))
+then
+	MYFILELIST="$USERINPUTFILE"
+else
+	MYFILELIST="$USERINPUTFILE $GROUPINPUTFILE"
+fi
+
+for MYTESTFILE in $MYFILELIST
 do
 	if [[ ! -r $MYTESTFILE ]]
 	then
-		echo "ERROR:4:Cannot read $MYTESTFILE"
-		exit 4
+		ERRVAL=14
+		ERRMSG="Cannot read $MYTESTFILE"
+		f_fatal
 	else
 		if (( ! $(grep -v ^# $MYTESTFILE | grep -v ^$ | wc -l) ))
 		then
-			echo "ERROR:5:No lines/entries in $MYTESTFILE"
-			exit 5
+			ERRVAL=15
+			ERRMSG="No lines/entries in $MYTESTFILE"
+			f_fatal
 		fi
 	fi
 done
@@ -274,8 +352,9 @@ f_getusername()
 		read WHOAMI_ADMIN
 		#if [[ -z $(grep  ^$WHOAMI_ADMIN: /etc/passwd) ]]
 		#then
-		#	echo "ERROR:10:User $WHOAMI_ADMIN does not exist.  Try again."	
-		#	exit 10
+		#	ERRVAL=10
+		#	ERRMSG="ERROR:10:User $WHOAMI_ADMIN does not exist.  Try again."	
+		#	f_fatal
 		#fi
 	fi
 }
@@ -313,24 +392,24 @@ f_passmail()
 		#
 		if [[ -n $(which md5sum 2> /dev/null | grep -v ^no) ]]
 		then
-			PASSWORD=$(date | md5sum | cut -c1-8)
+			PASSWORD=$(date | md5sum | cut -c1-$PASSLENGTH)
 
 		elif [[ -n $(which openssl 2> /dev/null | grep -v ^no) ]]
 		then
 			if [[ $(uname) = HP-UX ]]
 			then
 				PASSWORD=$(date | openssl md5 \
-								| cut -c1-8)
+								| cut -c1-$PASSLENGTH)
 			else
 				PASSWORD=$(date | openssl md5 \
 				 				| awk -F= '{print $2}' \
 								| sed -e 's/ //g' \
-								| cut -c1-8)
+								| cut -c1-$PASSLENGTH)
 			fi
 
 		elif [[ -n $(which csum 2> /dev/null | grep -v ^no) ]]
 		then
-			PASSWORD=$(date | csum -h MD5 - | cut -c1-8)
+			PASSWORD=$(date | csum -h MD5 - | cut -c1-$PASSLENGTH)
 		fi
 	fi
 
@@ -340,7 +419,7 @@ f_passmail()
 			#give the ability to exclude certain chars/number from the list
 			set -A char 2 3 4 5 6 7 8 9 A B C D E F G H J K M N P Q R S T U V W X Y Z a b c d e f g h j k m n p q r s t u v w x y z
 
-			while [ ${#PASSWORD} -lt 8 ]
+			while [ ${#PASSWORD} -lt $PASSLENGTH ]
 			do
 				PASSWORD="$PASSWORD${char[$(($RANDOM%${#char[*]}+1))]}"
 			done
@@ -356,8 +435,9 @@ f_passmail()
 	then
 		if [[ -n $(uname -r | grep 11.31) ]]
 		then
-			echo "ERROR:10:Won't work on 11.31, only older versions"
-			exit 10
+			ERRVAL=10
+			ERRMSG="ERROR:10:Won't work on 11.31, only older versions"
+			f_fatal
 		else
 			/usr/sam/lbin/usermod.sam -F \
 		             	-p "$(echo ${PASSWORD}aa | /usr/lib/makekey)" $MYUSER
@@ -408,13 +488,13 @@ f_addgroup ()
 	#
 	# add groups (if they don't already exist)
 	#
-
 	grep -v ^# $GROUPINPUTFILE | grep -v ^$ | while read MYLINE
 	do
 		if [[ $(echo $MYLINE | awk -F: '{print NF}') = 4 ]]
 		then
 			#
 			# normal password fields of 4
+			# setup as a basic file of:   GROUPNAME:x:GID:[users]
 			#
 			MYGROUP="$(echo $MYLINE | awk -F: '{print $1}')"
 			MYGID="$(echo $MYLINE   | awk -F: '{print $3}')"
@@ -430,18 +510,22 @@ f_addgroup ()
 		then
 			if [[ -z $(grep -w  ^$MYGROUP /etc/group) ]]
 			then
-				echo "ACTION: GROUP creating $MYGROUP" | tee -a $LOGFILE
+				echo "ACTION: GROUP creating $MYGROUP" \
+						| tee -a $LOGFILE
 				groupadd -g $MYGID $MYGROUP
 			else
-				echo "OK: GROUP $MYGROUP already exists" | tee -a $LOGFILE
+				echo "OK: GROUP $MYGROUP already exists" \
+						| tee -a $LOGFILE
 			fi
 		else
 			if [[ -z $(lsgroup -c $MYGROUP) ]]
 			then
-					echo "ACTION: GROUP creating $MYGROUP" | tee -a $LOGFILE
+					echo "ACTION: GROUP creating $MYGROUP" \
+							| tee -a $LOGFILE
 					mkgroup -A id=$MGYID $MYGROUP
 			else
-					echo "OK: GROUP $MYGROUP already exists" | tee -a $LOGFILE
+					echo "OK: GROUP $MYGROUP already exists" \
+							| tee -a $LOGFILE
 			fi
 		fi
 	done	
@@ -459,28 +543,38 @@ f_postcheck ()
 	#
 	if [[ $OSTYPE = AIX ]]
 	then
-		echo "ACTION: Doing pwdck -y ALL." | tee -a $LOGFILE
+		echo "ACTION: Doing pwdck -y ALL." \
+				| tee -a $LOGFILE
 		pwdck -y ALL
+
 	else
-		echo "ACTION: Doing pwck." | tee -a $LOGFILE
+		#other os flavors
+		echo "ACTION: Doing pwck." \
+				| tee -a $LOGFILE
 		pwck
-				if [[ $OSTYPE = Linux ]]
-				then
-					pwconv
-				fi
+
+		if [[ $OSTYPE = Linux ]]
+		then
+			pwconv
+		fi
 	fi
 	
 	if [[ $OSTYPE = AIX ]]
 	then
-		echo "ACTION: Doing grpck -y ALL." | tee -a $LOGFILE
+		echo "ACTION: Doing grpck -y ALL." \
+				| tee -a $LOGFILE
 		grpck -y ALL
+
 	else
-		echo "ACTION: Doing grpck." | tee -a $LOGFILE
+		#other os flavors
+		echo "ACTION: Doing grpck." \
+				| tee -a $LOGFILE
 		grpck
-				if [[ $OSTYPE = Linux ]]
-				then
-					grpconv
-				fi
+
+		if [[ $OSTYPE = Linux ]]
+		then
+			grpconv
+		fi
 	fi
 }
 
@@ -496,9 +590,17 @@ f_genericusers ()
 	#
 	if [[ $GENERIC = 1 || -n $(echo $GENUSERS | grep -w $MYUSER) ]]
 	then
-		if [[ $OSTYPE = AIX ]]
+		if [[ $OSTYPE = Linux ]]
 		then
-			echo "ACTION: Setting up GENERIC attributes for $MYUSER" | tee -a $LOGFILE
+			echo "ACTION: Setting up GENERIC attributes for $MYUSER" \
+					| tee -a $LOGFILE
+			#
+			chage -M 99999 $MYUSER 
+
+		elif [[ $OSTYPE = AIX ]]
+		then
+			echo "ACTION: Setting up GENERIC attributes for $MYUSER" \
+					| tee -a $LOGFILE
 			#
 			# Assumes when user was setup, that they have a profile that keeps
 			# them being able to log in directly.
@@ -531,7 +633,8 @@ f_addusers()
 		set -x
 	fi
 
-	echo "INFO: $0 starting on `date`" | tee -a $LOGFILE
+	echo "INFO: $0 starting on `date`" \
+			| tee -a $LOGFILE
 	
 	grep -v ^# $USERINPUTFILE | grep -v ^$ | while read MYLINE
 	do
@@ -544,13 +647,16 @@ f_addusers()
 
 			# 
 			# Not 7 fields
-			# We are going to accept 8 fields, ONLY if the first field has a specific pattern in it: HID
+			# We are going to accept 8 fields, 
+			# ONLY if the first field has a specific pattern, as in: HID, NHID
 			# 
 			if [[ -n $(echo $MYLINE | awk -F: '{print $1}' | grep HID) && $(echo $MYLINE | awk -F: '{print NF}') = 8 ]]
 			then
-				echo "OK: LINE is good." | tee -a $LOGFILE
+				echo "OK: LINE is good." \
+						| tee -a $LOGFILE
 			else
-				echo "ERROR: Skipping LINE because it has incorrect number of fields and/or values." | tee -a $LOGFILE
+				echo "ERROR: Skipping LINE because it has incorrect number of fields and/or values." \
+						| tee -a $LOGFILE
 				echo "LINE: $MYLINE"
 				continue
 			fi
@@ -571,6 +677,7 @@ f_addusers()
 			#
 			# fields of 8
 			#
+			MYTYPE="$(echo $MYLINE  | awk -F: '{print $1}')"
 			MYUSER="$(echo $MYLINE  | awk -F: '{print $2}')"
 			MYUID="$(echo $MYLINE   | awk -F: '{print $4}')"
 			MYGID="$(echo $MYLINE   | awk -F: '{print $5}')"
@@ -584,60 +691,81 @@ f_addusers()
 			GECOS="User $MYUSER"
 		fi
 	
-		if [[ -z $(grep -w $MYUSER /etc/passwd) ]]
+		if [[ -z $(grep ^${MYUSER}: /etc/passwd) ]]
 		then
-			echo "ACTION: USER creating $MYUSER on `date`" | tee -a $LOGFILE
+			echo "ACTION: USER creating $MYUSER on `date`" \
+					| tee -a $LOGFILE
 	
 			echo "INFO: useradd -u $MYUID -g $MYGID -m -d $MYHOME -s $MYSHELL -c "$MYGECOS" $MYUSER"
 
 			useradd -u $MYUID -g $MYGID -m -d $MYHOME -s $MYSHELL -c "$MYGECOS" $MYUSER
 			USER_RC=$?
-	
+
 			#
 			# if you added the user successfully, then do the other changes too
 			#
-			if (( ! $USER_RC ))
+			if (( $USER_RC ))
 			then
-				f_passmail
+				echo "ERROR: $MYUSER NOT added to system"
+
+			else
+				echo "INFO: $MYUSER added to system"
 	
-				if [[ $OSTYPE = Linux ]]
+				if [[ $GENERIC == 1 || -n $(echo $MYTYPE | grep -i NHID) ]]
 				then
-					#echo "ACTION: adding groups to $MYUSER"
-					#usermod -a -G usa,staff $MYUSER
-					echo "ACTION: forcing password expiration for $MYUSER" | tee -a $LOGFILE
-					chage -d0 $MYUSER
-		
-				elif [[ $OSTYPE = AIX ]]
-				then
-					#echo "ACTION: adding groups to $MYUSER"
-					#chuser groups=usa,staff $MYUSER
-					echo "ACTION: forcing password expiration for $MYUSER" | tee -a $LOGFILE
-					pwdadm -f ADMCHG $MYUSER
-		
-				elif [[ $OSTYPE = HP-UX ]]
-				then
-					#echo "ACTION: adding groups to $MYUSER"
-					#usermod -G usa,staff $MYUSER
-					echo "ACTION: forcing password expiration for $MYUSER" | tee -a $LOGFILE
-					passwd -f $MYUSER
-		
-				elif [[ $OSTYPE = SunOS ]]
-				then
-					#echo "ACTION: adding groups to $MYUSER"
-					#usermod -G usa,staff $MYUSER
-					echo "ACTION: forcing password expiration for $MYUSER" | tee -a $LOGFILE
-					passwd -f $MYUSER
+					echo "INFO: Generic User $MYUSER"
+					f_genericusers
+
+				else
+					#only email password for non-generics (users)
+					#generics have their password set, but is kept "private"
+
+					f_passmail
+	
+					if [[ $OSTYPE = Linux ]]
+					then
+						#echo "ACTION: adding groups to $MYUSER"
+						#usermod -a -G usa,staff $MYUSER
+						echo "ACTION: forcing password expiration for $MYUSER" \
+								| tee -a $LOGFILE
+						chage -d0 $MYUSER
+			
+					elif [[ $OSTYPE = AIX ]]
+					then
+						#echo "ACTION: adding groups to $MYUSER"
+						#chuser groups=usa,staff $MYUSER
+						echo "ACTION: forcing password expiration for $MYUSER" \
+								| tee -a $LOGFILE
+						pwdadm -f ADMCHG $MYUSER
+			
+					elif [[ $OSTYPE = HP-UX ]]
+					then
+						#echo "ACTION: adding groups to $MYUSER"
+						#usermod -G usa,staff $MYUSER
+						echo "ACTION: forcing password expiration for $MYUSER" \
+								| tee -a $LOGFILE
+						passwd -f $MYUSER
+			
+					elif [[ $OSTYPE = SunOS ]]
+					then
+						#echo "ACTION: adding groups to $MYUSER"
+						#usermod -G usa,staff $MYUSER
+						echo "ACTION: forcing password expiration for $MYUSER" \
+								| tee -a $LOGFILE
+						passwd -f $MYUSER
+					fi
 				fi
 			fi
 		else
-			echo "OK: USER $MYUSER already exists on `date`" | tee -a $LOGFILE
-		fi
+			echo "OK: USER $MYUSER already exists on `date`" \
+					| tee -a $LOGFILE
 
-		#####################
-		# post test/checks
-		#####################
-		f_genericusers
-	
+			if (( $RESETPASSWORDS ))
+			then
+				#even if the user already exists, if we want a reset regardless
+				f_passmail
+			fi
+		fi
 	done
 }
 
@@ -656,8 +784,14 @@ then
 fi
 
 f_getusername
-f_addgroup
+
+if (( ! $NOGROUPFILE ))
+then
+	f_addgroup
+fi
+
 f_addusers
 f_postcheck
 
-echo "INFO: $0 done on `date`" | tee -a $LOGFILE
+echo "INFO: $0 done on `date`" \
+		| tee -a $LOGFILE
