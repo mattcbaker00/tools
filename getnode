@@ -21,13 +21,97 @@
 #      doesn't run each function in all the OS types (some are no-ops)
 #
 # Written by Matt Baker mbaker@computeranddata.com
-# Version: 2015.09.30.0001
+#
+# Version: 2018.03.05.0001
 #
 #DOCEND
 #
 ################################################################################
 #
 # $Log: getnode,v $
+# Revision 1.41  2018/03/05 16:04:27  jbakerm1
+# fixed hponcfg stderr/stdout capture
+#
+# Revision 1.40  2018/02/22 16:56:23  jbakerm1
+# baseline
+#
+# Revision 1.39  2017/11/30 23:33:04  jbakerm1
+# babaseline
+#
+# Revision 1.38  2017/11/12 02:49:29  jbakerm1
+# baseline
+#
+# Revision 1.37  2017/11/12 02:47:09  jbakerm1
+# changed multipath check for hpux
+#
+# Revision 1.36  2017/11/12 02:42:01  jbakerm1
+# baseline
+#
+# Revision 1.35  2017/04/20 16:22:58  jbakerm1
+# added osbuild MYFILE1a|b
+#
+# Revision 1.34  2017/04/20 14:14:20  jbakerm1
+# changed colon to comma in osbuild
+#
+# Revision 1.33  2017/04/20 13:49:13  jbakerm1
+# aadded pem file extraction for vendor software license
+#
+# Revision 1.32  2017/01/23 16:53:46  jbakerm1
+# added comment
+#
+# Revision 1.31  2016/08/04 13:44:17  jbakerm1
+# baseline
+#
+# Revision 1.30  2016/04/15 20:12:57  jbakerm1
+# fbug w/ wc on level
+#
+# Revision 1.29  2016/04/15 19:59:05  jbakerm1
+# changed LEVEL input test
+#
+# Revision 1.28  2016/04/15 18:57:19  jbakerm1
+# added $MYGREPOPT to all needed places
+#
+# Revision 1.27  2016/04/08 17:53:10  jbakerm1
+# added test for ORATAB for ASM checks
+#
+# Revision 1.26  2016/04/08 17:49:21  jbakerm1
+# final for storage changes
+#
+# Revision 1.25  2016/04/08 17:44:57  jbakerm1
+# baseline
+# updates to HPUX multpath check
+#
+# Revision 1.24  2016/04/08 17:34:04  jbakerm1
+# baseline
+#
+# Revision 1.23  2016/04/06 19:38:52  jbakerm1
+# baseline for changes
+#
+# Revision 1.22  2016/02/29 19:06:19  jbakerm1
+# added new console string (if in DNS)
+#
+# Revision 1.21  2016/02/24 19:52:55  jbakerm1
+# added console stuff
+#
+# Revision 1.20  2016/01/19 21:06:41  jbakerm1
+# fixes to last change
+#
+# Revision 1.19  2016/01/19 20:27:05  jbakerm1
+# change Suse stuff for lsb_release, doesn't work well with it
+# forcing it to parse the /etc/SuSE_release file
+#
+# Revision 1.18  2015/10/23 18:35:34  jbakerm1
+# fixed companyinfo
+#
+# Revision 1.17  2015/10/23 17:27:23  jbakerm1
+# added "ip addr" line for the ifconfig IP section
+#
+# Revision 1.16  2015/10/16 23:31:28  jbakerm1
+# baseline fixes
+#
+# Revision 1.15  2015/10/16 22:42:16  jbakerm1
+# lots of changes, fixing bugs and OUTPUT values
+#
 # Revision 1.14  2015/09/30 16:38:48  jbakerm1
 # added centrify
 #
@@ -129,12 +213,28 @@ HPMACHFILE=/tmp/$(basename $0).machfile
 
 ORATAB=/etc/oratab
 
+SVCMODEL=2145
+SVCPATHCOUNT=4
+SVCPATHCOUNT_HP=2
+
 PATH=$PATH:/usr/sbin:/sbin
 
 OSTYPE=$(uname)
 #For Linux, but not sure if this is best, 
 # removed because of bugs on some older HP versions
 # OSTYPE=$(uname -s)  
+
+if [[ $OSTYPE = Linux ]]
+then
+	LOGDIR=/var/log/user-script
+else
+	LOGDIR=/var/adm/user-script
+fi
+if [[ ! -d $LOGDIR ]]
+then
+	mkdir -p $LOGDIR
+fi
+LOGFILE=$LOGDIR/user_add_log.$(date +%Y%m%H%m)
 
 #######################################
 MYGREPOPT="-w"
@@ -155,6 +255,11 @@ f_myprint()
 	if (( DEBUG ))
 	then
 		set -x
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="unknown"
 	fi
 
 	OUTPUT=$(echo $OUTPUT \
@@ -233,10 +338,10 @@ f_usage()
 cat << EOF
 
 Usage: $0 [-v] [-debug] [-version]
-       [-line|-list] 
+       [-l | -line | -list] 
        [-noheader]
        [-filler]
-       [-level [b,m,def:f]]   #Brief, Medium, Full  
+       [-level [b,m,def:f,s]]   #Brief, Medium, Full, Storage  
        [-function    FUNCTIONNAME,FUNCTIONAME2,...]
        [-nofunction  FUNCTIONNAME,FUNCTIONAME2,...]
        [-listfunctions]
@@ -263,10 +368,10 @@ f_fatal()
 	then
 		set -x
 	fi
-	if [[ -w $LOGFILE_COMP ]]
+	if [[ -w $LOGFILE ]]
 	then
 		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " \
-			| tee -a $LOGFILE_COMP
+			| tee -a $LOGFILE
 	else
 		echo "$DATE $HOST $0 ERROR:$ERRVAL: $ERRMSG " 
 	fi
@@ -323,6 +428,13 @@ f_prep()
 		else
 			VMWARE=0
 		fi
+		if [[ -n $($MYCMD -s system-manufacturer | grep -i "Microsoft Corporation") ]]
+		then
+			AZURE=1
+		else
+			AZURE=0
+		fi
+
 
 	elif [[ $OSTYPE = SunOS ]]
 	then
@@ -413,6 +525,9 @@ f_runfunction()
 	#	set -x
 	#fi
 	#
+	HEADER=""
+	OUTPUT=""
+
 	RUNMEFUNCTION=$1
 	if [[ -z $RUNMEFUNCTION ]]
 	then
@@ -451,8 +566,6 @@ f_runfunction()
 						| sed -n 1p)"
 			OUTPUT="not-run"
 			f_myprint
-			HEADER=""
-			OUTPUT=""
 		fi
 	fi
 }
@@ -473,7 +586,7 @@ f_hostname()
 
 	#######################################
 	HEADER="System"
-	OUTPUT=$(hostname)
+	OUTPUT=$(hostname 2> /dev/null)
 
 	f_myprint
 }
@@ -489,7 +602,7 @@ f_ostype()
 		echo "INFO: function f_ostype"
 	fi
 	#######################################
-	HEADER="OS-Type and version"
+	HEADER="OS-Type and release"
 	
 	if [[ $OSTYPE = AIX ]]
 	then
@@ -512,21 +625,29 @@ f_ostype()
 			OEL_RELEASE=0
 		fi
 
-		if [[ -e /usr/bin/lsb_release ]]
+		if [[ -f /etc/os-release ]]
+		then
+			MYFILE=/etc/os-release
+	
+		#SuSE doesn't work well w/ lsb_release
+		elif [[ -f /etc/SuSE-release ]]
+		then
+			MYFILE=/etc/SuSE-release
+	
+		elif [[ -e /usr/bin/lsb_release ]]
 		then
 			PATH=$PATH:/usr/bin
 			MYFILE=lsb
+
 		elif [[ -e ./lsb_release ]]
 		then
+			#local copy/version of lsb_release
 			PATH=$PATH:.
 			MYFILE=lsb
+
 		elif [[ -f /etc/system-release ]]
 		then
 			MYFILE=/etc/system-release
-	
-		elif [[ -f /etc/os-release ]]
-		then
-			MYFILE=/etc/os-release
 	
 		elif [[ -f /etc/redhat-release ]]
 		then
@@ -535,10 +656,6 @@ f_ostype()
 		elif [[ -f /etc/fedora-release ]]
 		then
 			MYFILE=/etc/fedora-release
-	
-		elif [[ -f /etc/SuSE-release ]]
-		then
-			MYFILE=/etc/SuSE-release
 	
 		elif [[ -f /etc/debian-release ]]
 		then
@@ -562,26 +679,27 @@ f_ostype()
 				OUTPUT="$(cat $MYFILE)"
 			fi
 
-		elif [[ $MYFILE = lsb ]]
-		then
-			OUTPUT="$(lsb_release -si) $(lsb_release -sr)"
-			#OUTPUT="$(/usr/bin/lsb_release -sd)"
-
-		elif [[ $MYFILE = /etc/os-release ]]
-		then
-			OUTPUT="$(awk -F= '/PRETTY_NAME/ {print $2}' $MYFILE)"
-
-		elif [[ -n $(grep $MYGREPOPT "Red Hat" $MYFILE) ]]
-		then
-			OUTPUT="$(awk '{print $1" "$2" "$7}' $MYFILE)"
-
 		elif [[ $MYFILE = /etc/SuSE-release ]]
 		then
 			OUTPUT1="$(sed -n 1p $MYFILE | awk '{print $1}')"
 			OUTPUT="$OUTPUT1 $(grep = $MYFILE \
 						| awk -F= '{print $2}' \
-						| tr '\012' ',' \
-						| sed -e 's/"//g')"
+						| tr '\012' '.' \
+						| sed -e 's/"//g; s/\.$//; s/ //g')"
+
+		elif [[ $MYFILE = lsb ]]
+		then
+				OUTPUT="$(lsb_release -si) $(lsb_release -sr)"
+				#OUTPUT="$(/usr/bin/lsb_release -sd)"
+
+		elif [[ $MYFILE = /etc/os-release ]]
+		then
+				OUTPUT="$(awk -F= '/^VERSION_ID/ {print $2}' $MYFILE \
+                    	| sed -e 's/\"//g')"
+
+		elif [[ -n $(grep $MYGREPOPT "Red Hat" $MYFILE) ]]
+		then
+			OUTPUT="$(awk '{print $1" "$2" "$7}' $MYFILE)"
 		else
 			OUTPUT="$(awk '{print $1" "$3}' $MYFILE)"
 		fi
@@ -590,6 +708,85 @@ f_ostype()
 					| tr '\012' ' ')"
 	fi
 	OUTPUT=$(echo $OUTPUT | sed -e 's/"//g')
+
+	f_myprint
+}
+
+f_osbuild()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_osbuild"
+	fi
+	#######################################
+	HEADER="OSBuild"
+	OUTPUT=""
+	#
+	if [[ $OSTYPE = Linux ]]
+	then
+		#for Redhat, there can be multiple pem files
+		#old deprecated
+		MYFILE1a=$(echo /etc/pki/product/*.pem)
+		#new future (but both exist on the same system)
+		MYFILE1b=$(echo /etc/pki/product-default/*.pem)
+
+		#for Suse, there should be a single file (this is a link)
+		MYFILE2=/etc/products.d/baseproduct
+		if [[ -f $MYFILE1a ||  -f $MYFILE1b ]]
+		then
+			if [[ -f $MYFILE1a ||  -f $MYFILE1b ]]
+			then
+				MYFILE1=$MYFILE1b
+			else
+				MYFILE1=$MYFILE1a
+			fi
+			#Redhat/RHEL
+			#this will be a long/full list IF there are multiple pem files
+			#which would be unique (base installs only have 1 file)
+			#others would be: if "grid computing" or if a HPC
+			OUTPUT=$(rct cat-cert  $MYFILE1 \
+				| egrep -we "Serial:|ID:|Name:|Version:|Tags:" \
+				| awk -F: '{print $2}' \
+				| sed -e '1d;$d' \
+				| tr '\012' ',')
+
+		elif [[ -f $MYFILE2 ]]
+		then
+			#Suse/SLES
+			if [[ -n $(grep upgrades $MYFILE2) ]]
+			then
+				#SLES: 12
+				OUTPUT=$(sed -e '/<upgrades/,/<\/upgrades/d' \
+					$MYFILE2 \
+					| egrep -hwe \
+					'updaterepokey|summary|producttheme|distribution' \
+					| sed -re 's/<\/?\w+>//g' \
+					| tr '\012' ',')
+			else
+				#SLES: 11
+				OUTPUT=$(sed -e '/<updates/,/<\/updates/d' \
+					$MYFILE2 \
+					| egrep -hwe \
+					'updaterepokey|summary|producttheme|distribution' \
+					| sed -re 's/<\/?\w+>//g' \
+					| tr '\012' ',')
+			fi
+		else
+			OUTPUT=unknown
+		fi
+	else
+		OUTPUT=unknown
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="could-not-determine"
+	fi
+
 	f_myprint
 }
 
@@ -656,7 +853,7 @@ f_domain()
 							| sed -e 's/\.$//')
 			fi
 			#see if FQDN is in hosts file 
-			if [[ -n $OUTPUT ]]
+			if [[ -z $OUTPUT ]]
 			then
 				OUTPUT=$(grep -v ^# /etc/hosts \
 							| grep $MYGREPOPT $HOSTNAME\
@@ -749,6 +946,7 @@ f_patch()
 	else
 		OUTPUT=$(uname -v)
 	fi
+
 	f_myprint
 }
 
@@ -831,6 +1029,11 @@ f_model()
 	else
 		OUTPUT="unknown"
 	fi
+
+	if [[ -z $OUTPUT ]]
+	then 
+		OUTPUT=unknown
+	fi
 	f_myprint
 }
 
@@ -869,6 +1072,7 @@ f_arch()
 	else
 		OUTPUT=$(uname -p)
 	fi
+
 	f_myprint
 }
 
@@ -914,6 +1118,7 @@ f_cputype()
 	else
 		OUTPUT=$(uname -m)
 	fi
+
 	f_myprint
 }
 
@@ -1219,6 +1424,20 @@ f_cpucount()
 	else
 		OUTPUT="unknown"
 	fi
+
+	f_myprint
+
+	#
+	#Output the total_count (cores * sockets) for use by others
+	#
+	HEADER="Total Core Count"
+	if [[ $OUTPUT != unknown && $OSTYPE = Linux ]]
+	then
+		OUTPUT=$(eval echo "$SOCKETS*$CORESPS" | bc)
+	else
+		OUTPUT="not-computed"
+	fi
+
 	f_myprint
 }
 
@@ -1285,6 +1504,7 @@ f_cpuspeed()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -1345,6 +1565,7 @@ f_memory()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -1411,11 +1632,6 @@ f_sernum()
 		OUTPUT="unknown"
 	fi
 
-	if [[ -z $OUTPUT ]]
-	then
-		OUTPUT="unknown"
-	fi
-
 	f_myprint
 }
 
@@ -1436,11 +1652,11 @@ f_hostid()
 		OUTPUT="$(uname -m;hostid)"
 	elif [[ $OSTYPE = HP-UX ]]
 	then
-		OUTPUT="$(uname -i | awk '{printf "%x\n",$1}'
-)"
+		OUTPUT="$(uname -i | awk '{printf "%x\n",$1}')"
 	else
 		OUTPUT=$(hostid)
 	fi
+
 	f_myprint
 }
 
@@ -1521,6 +1737,7 @@ f_firmware()
 		HEADER="Firmware"
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -1542,6 +1759,7 @@ f_pagesize()
 	else
 		OUTPUT=$(pagesize)
 	fi
+
 	f_myprint
 }
 
@@ -1619,6 +1837,7 @@ f_kerneltype()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -1636,14 +1855,27 @@ f_vip()
 	HEADER="VIPs"
 	if [[ $OSTYPE = Linux ]]
 	then
-		OUTPUT=$(ifconfig -a \
-					| grep ^.*inet \
-					| egrep -ve "127\.0\.0\.1|::" \
-					| awk '{print $2}' \
-					| awk -F: '{print $2}' \
-					| grep -v :: \
-					| tr '\012' ',' \
-			 		| sed -e 's/,$//g')
+		if [[ -f /sbin/ip ]]
+		then
+			OUTPUT=$(ip addr \
+						| grep ^.*inet \
+						| egrep -ve "127\.0\.0\.1|::" \
+						| awk '{print $2}' \
+						| awk -F\/ '{print $1}' \
+						| tr '\012' ',' \
+				 		| sed -e 's/,$//g')
+		else
+			#old way, with a :, via ifconfig
+			OUTPUT=$(ifconfig -a \
+						| grep ^.*inet \
+						| egrep -ve "127\.0\.0\.1|::" \
+						| awk '{print $2}' \
+						| awk -F: '{print $2}' \
+						| grep -v :: \
+						| tr '\012' ',' \
+				 		| sed -e 's/,$//g')
+		fi
+	
 	elif [[ $OSTYPE = HP-UX ]]
 	then
 		#"ifconfig -a" doesn't exist on HP-UX
@@ -1652,6 +1884,7 @@ f_vip()
 					| grep -v none \
 					| tr '\012' ',')
 	else
+		#there is a tab (hidden) on the "grep inet" line
 		OUTPUT=$(ifconfig -a \
 					| grep '	inet' \
 					| grep -v 127\.0\.0\.1 \
@@ -1660,6 +1893,7 @@ f_vip()
 					| tr '\012' ',' \
 			 		| sed -e 's/,$//g')
 	fi
+
 	f_myprint
 }
 
@@ -1731,6 +1965,7 @@ f_hba()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -1748,78 +1983,99 @@ f_hba_spec()
 	HEADER="HBA Specs [model  firmware  driver]"
 	if [[ $OSTYPE = Linux ]]
 	then
-		#this gives HBA instances
-		#OUTPUT=$(lspci \
-		#		| grep -i "Host Adapter" \
-		#		| egrep -ice 'Fibre|Fibre')
-		#this give HBA ports
-		if [[ -n $(ls -ld /sys/class/scsi_host/host* 2> /dev/null) ]]
+		if (( ! $AZURE && ! $VMWARE ))
 		then
-			#Found that info file didn't always have model and its
-			#ordering of info wasn't consistent, so went to modelname.
-			#OUTPUT1=$(cat /sys/class/scsi_host/host*/info \
-			#		| sed -n 1p \
-			#		| awk '{print $1"_"$2}')
-			OUTPUT1=$(cat /sys/class/scsi_host/host*/modelname \
-							2> /dev/null\
-						| sed -n 1p \
-						| sed -e 's/ /_/g')
-			if [[ -z $OUTPUT1 ]]
+			#this gives HBA instances
+			#OUTPUT=$(lspci \
+			#		| grep -i "Host Adapter" \
+			#		| egrep -ice 'Fibre|Fibre')
+			#this give HBA ports
+			if [[ -n $(ls -ld /sys/class/scsi_host/host* 2> /dev/null) ]]
 			then
-				OUTPUT1=$(cat /sys/class/scsi_host/host*/version_product \
+				#Found that info file didn't always have model and its
+				#ordering of info wasn't consistent, so went to modelname.
+				#OUTPUT1=$(cat /sys/class/scsi_host/host*/info \
+				#		| sed -n 1p \
+				#		| awk '{print $1"_"$2}')
+				OUTPUT1=$(cat /sys/class/scsi_host/host*/modelname \
 								2> /dev/null\
 							| sed -n 1p \
 							| sed -e 's/ /_/g')
-			fi
-			OUTPUT2=$(cat /sys/class/scsi_host/host*/fwrev \
-							2> /dev/null\
-						| sed -n 1p \
-						| sed -e 's/,//g' \
-						| sed -e 's/ /_/g')
-			if [[ -z $OUTPUT2 ]]
-			then
-				OUTPUT2=$(cat /sys/class/scsi_host/host*/version_fw \
+				if [[ -z $OUTPUT1 ]]
+				then
+					OUTPUT1=$(cat /sys/class/scsi_host/host*/version_product \
+									2> /dev/null\
+								| sed -n 1p \
+								| sed -e 's/ /_/g')
+				fi
+				OUTPUT2=$(cat /sys/class/scsi_host/host*/fwrev \
 								2> /dev/null\
 							| sed -n 1p \
 							| sed -e 's/,//g' \
 							| sed -e 's/ /_/g')
-			fi
-			OUTPUT3=$(cat /sys/class/scsi_host/host*/lpfc_drvr_version \
-							2> /dev/null\
-						| sed -n 1p \
-						| awk '{print $NF}')
-			if [[ -z $OUTPUT3 ]]
-			then
-				OUTPUT3=$(cat /sys/class/scsi_host/host*/version_bios \
+				if [[ -z $OUTPUT2 ]]
+				then
+					OUTPUT2=$(cat /sys/class/scsi_host/host*/version_fw \
+									2> /dev/null\
+								| sed -n 1p \
+								| sed -e 's/,//g' \
+								| sed -e 's/ /_/g')
+				fi
+				OUTPUT3=$(cat /sys/class/scsi_host/host*/lpfc_drvr_version \
 								2> /dev/null\
 							| sed -n 1p \
 							| awk '{print $NF}')
-			fi
+				if [[ -z $OUTPUT3 ]]
+				then
+					OUTPUT3=$(cat /sys/class/scsi_host/host*/version_bios \
+									2> /dev/null\
+								| sed -n 1p \
+								| awk '{print $NF}')
+				fi
+	
+				if [[ -n $(ls -ld /sys/class/scsi_host/host*/device/fc_host/host*/port_name 2> /dev/null) ]]
+				then
+					OUTPUT4=$(cat /sys/class/scsi_host/host*/device/fc_host/host*/port_name)
+				else
+					OUTPUT4=""
+				fi	
+	
+				#this give HBA info
+				OUTPUT5="$(lspci -vvvv \
+							| grep -i "Host Adapter" \
+							| egrep -ie 'Fibre|Fibre' \
+							| cut -c10- \
+							| awk -F: '{print $2" "$3}' \
+							| sort -u) \
+						$(systool -v -c fc_host 2>/dev/null \
+							| grep symbolic_name \
+							| awk -F= '{print $2}' \
+							| sed -e 's/\"//g' \
+							| sort -u)"
+	
+				#driver info
+				TEMPOUT="$(lspci -vvvv \
+							| sed -n '/Fibre Channel/,/^$/p' \
+							| awk -F: '/driver/ {print $2}' \
+							| sort -u)"
 
-			if [[ -n $(ls -ld /sys/class/scsi_host/host*/device/fc_host/host*/port_name 2> /dev/null) ]]
-			then
-				OUTPUT4=$(cat /sys/class/scsi_host/host*/device/fc_host/host*/port_name)
+				for DRIVER in $TEMPOUT
+				do
+					OUTPUT6="$OUTPUT6 $(modinfo $DRIVER \
+							| egrep 'filename|version|author|description' \
+							| awk -F: '{print $2}' \
+							| tr '\012' ',' \
+							| sed -e 's/,$//')"
+				done
+	
+				OUTPUT="$OUTPUT1,$OUTPUT2,$OUTPUT3,$OUTPUT4,$OUTPUT5,$OUTPUT6"
 			else
-				OUTPUT4=""
-			fi	
-
-			#this give HBA info
-			OUTPUT5="$(lspci -vvvv \
-						| grep -i "Host Adapter" \
-						| egrep -ie 'Fibre|Fibre' \
-						| cut -c10- \
-						| awk -F: '{print $2" "$3}' \
-						| sort -u) \
-					$(systool -v -c fc_host 2>/dev/null \
-						| grep symbolic_name \
-						| awk -F= '{print $2}' \
-						| sed -e 's/\"//g' \
-						| sort -u)"
-
-			OUTPUT="$OUTPUT1,$OUTPUT2,$OUTPUT3,$OUTPUT4,$OUTPUT5"
+				OUTPUT="na"
+			fi
 		else
-			OUTPUT=0
+			OUTPUT="na"
 		fi
+
 	elif [[ $OSTYPE = HP-UX ]]
 	then
 		MYCMD=""
@@ -1913,7 +2169,7 @@ f_hba_spec()
 						| sed -n 1p)"
 
 			HBA_FIRM="$(lscfg -vl $HBA_VAR \
-						| grep -w '(Z9)' \
+						| grep $MYGREPOPT '(Z9)' \
 						| sed -e 's/\.\./ /g' \
 						| awk '{print $NF}')"
 
@@ -1928,6 +2184,7 @@ f_hba_spec()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2004,7 +2261,7 @@ f_raid()
 					#Smart Array
 					TEMPOUT="$(lshal \
 							| awk '/'"$MYPATTERN"'/,/pci.subsys_product/ {print $0}' \
-							| grep -w pci.subsys_product \
+							| grep $MYGREPOPT pci.subsys_product \
 							| awk -F= '{print $2}' \
 							| sed -e "s/'//g" \
 							| sed -e "s/(.*)//g" \
@@ -2013,7 +2270,7 @@ f_raid()
 					#cciss
 					TEMPOUT="$(lshal \
 							| awk '/'"$MYPATTERN"'/,/pci.vendor_id/ {print $0}' \
-							| egrep -w 'info.product|pci.subsys_product|pci.vendor_id' \
+							| egrep $MYGREPOPT 'info.product|pci.subsys_product|pci.vendor_id' \
 							| awk -F= '{print $2}' \
 							| sed -e "s/'//g" \
 							| sort -u)"
@@ -2026,6 +2283,7 @@ f_raid()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2121,6 +2379,7 @@ f_nic()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2175,6 +2434,7 @@ f_software()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 	#
 	#######################################
@@ -2199,6 +2459,7 @@ f_software()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2214,6 +2475,7 @@ f_disks()
 	fi
 	#######################################
 	HEADER="Installed-disk-vendor-types-and-counts"
+	OUTPUT=""
 	if [[ $OSTYPE = Linux ]]
 	then
 		#
@@ -2225,16 +2487,17 @@ f_disks()
 			MYTYPES="$(lsscsi 2> /dev/null \
 					| grep -iv "cd/dvd" \
 					| awk '{print $3}'\
+					| egrep -ive "GB|MB|KB" \
 					| sort -u )"
 			for MYTYPE in $MYTYPES
 			do
-				if [[ -z $MYTYPES ]]
+				if [[ -z $OUTPUT ]]
 				then
 					OUTPUT="$MYTYPE $(lsscsi 2> /dev/null \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				else
 					OUTPUT="$OUTPUT,$MYTYPE $(lsscsi 2> /dev/null \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				fi
 			done
 		else
@@ -2243,6 +2506,7 @@ f_disks()
 					| grep -iv "cd/dvd" \
 					| grep -iv "cdr" \
 					| awk '/Vendor:/ {print $2}'\
+					| egrep -ive "GB|MB|KB" \
 					| sort -u )"
 			for MYTYPE in $MYTYPES
 			do
@@ -2252,16 +2516,22 @@ f_disks()
 							| grep -iv "cd/dvd" \
 							| grep -iv "cdr" \
 							| awk '/Vendor:/ {print $2}'\
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				else
 					OUTPUT="$OUTPUT,$MYTYPE $(cat /proc/scsi/scsi \
 							| grep -iv "cd/dvd" \
 							| grep -iv "cdr" \
 							| awk '/Vendor:/ {print $2}'\
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				fi
 			done
 		fi
+
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="unknown"
+		fi
+
 	elif [[ $OSTYPE = HP-UX ]]
 	then
 		if (( $(uname -r | awk -F. '{print $2}') == 11 \
@@ -2278,11 +2548,11 @@ f_disks()
 				then
 					OUTPUT="$MYTYPE $(ioscan -m lun \
 							| awk '/^disk/ {print $8}' \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				else
 					OUTPUT="$OUTPUT,$MYTYPE $(ioscan -m lun \
 							| awk '/^disk/ {print $8}' \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				fi
 			done
 		else
@@ -2299,40 +2569,52 @@ f_disks()
 				if [[ -z $OUTPUT ]]
 				then
 					OUTPUT="$MYTYPE $(ioscan -FknC disk \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				else
 					OUTPUT="$OUTPUT,$MYTYPE $(ioscan -FknC disk \
-							| grep -cw $MYTYPE)"
+							| grep $MYGREPOPT -c $MYTYPE)"
 				fi
 			done
 		fi
 
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="unknown"
+		fi
+
 	elif [[ $OSTYPE = AIX ]]
 	then
-			OUTPUT=""
-			MYTYPES="$(lsdev -Cc disk \
+		OUTPUT=""
+		MYTYPES="$(lsdev -Cc disk \
+					| grep Available \
+					| awk '/^hdisk/ {print $4}' \
+					| sort -u)"
+
+		for MYTYPE in $MYTYPES
+		do
+			if [[ -z $OUTPUT ]]
+			then
+				OUTPUT="$MYTYPE $(lsdev -Cc disk \
 						| grep Available \
 						| awk '/^hdisk/ {print $4}' \
-						| sort -u)"
+						| grep $MYGREPOPT -c $MYTYPE)"
+			else
+				OUTPUT="$OUTPUT,$MYTYPE $(lsdev -Cc disk \
+						| grep Available \
+						| awk '/^hdisk/ {print $4}' \
+						| grep $MYGREPOPT -c $MYTYPE)"
+			fi
+		done
 
-			for MYTYPE in $MYTYPES
-			do
-				if [[ -z $OUTPUT ]]
-				then
-					OUTPUT="$MYTYPE $(lsdev -Cc disk \
-							| grep Available \
-							| awk '/^hdisk/ {print $4}' \
-							| grep -cw $MYTYPE)"
-				else
-					OUTPUT="$OUTPUT,$MYTYPE $(lsdev -Cc disk \
-							| grep Available \
-							| awk '/^hdisk/ {print $4}' \
-							| grep -cw $MYTYPE)"
-				fi
-			done
+		if [[ -z $OUTPUT ]]
+		then
+			OUTPUT="unknown"
+		fi
+
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2359,14 +2641,21 @@ f_disks_total_size()
 
 		#pvs - in LVM
 		MYPVSFILE=/tmp/mypvs.$$
-		pvs --units g --noheadings 2> /dev/null  > $MYPVSFILE
+		pvs --nosuffix --units g --noheadings 2> /dev/null  > $MYPVSFILE
+
+		if [[ -s $MYPVSFILE ]]
+		then
+			#assuming pvs doesn't show up anyting (like in azure for OS disks)
+			#so we fake it out here
+			fdisk -lu | grep ^Disk | grep bytes | grep -v mapper > $MYPVSFILE
+
+		fi
 
 		MYCOUNT=$(cat $MYPVSFILE | wc -l)
 
 		if (( $MYCOUNT ))
 		then
 			TEMP_PVS_OUTPUT=$(cat $MYPVSFILE \
-						| sed -e 's/[Gg]//g' \
 						| awk  '{sum +=$5} END {print sum}')
 		else
 			TEMP_PVS_OUTPUT=0
@@ -2379,6 +2668,11 @@ f_disks_total_size()
 					| tr '\012' '|' \
 					| sed -e 's@|$@@')
 
+		if [[ -z $LVMDISKS ]]
+		then
+			#if empty because no pvs output, then set it to a bogus string
+			LVMDISKS="thisisaboguspatterntouse"
+		fi
 		NONLVMDISKS=$(fdisk -lu 2> /dev/null \
 					| egrep -ie 'KB|MB|GB|TB' \
 					| grep -v mapper \
@@ -2393,6 +2687,8 @@ f_disks_total_size()
 			TEMPMYSIZE=$(fdisk -lu $MYDISK 2> /dev/null \
 					| egrep -ie 'KB|MB|GB|TB' \
 					| awk '{print $3}') 
+
+#TODO: bug - can get multiple scales
 
 			#want GB
 			TEMPMYSIZE_UNITS=$(fdisk -lu $MYDISK 2> /dev/null \
@@ -2422,9 +2718,11 @@ f_disks_total_size()
 		#Combine numbers from each, add GB to output
 		OUTPUT=$(echo "$PVS_OUTPUT + $FDISK_OUTPUT" | bc -l)
 		OUTPUT="$OUTPUT GB"
+
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2442,14 +2740,9 @@ f_vgs()
 	HEADER="Disks-vgs-sizesGB-total-and-free"
 	if [[ $OSTYPE = Linux ]]
 	then
-		OUTPUT1="$(vgs --nosuffix --units g 2> /dev/null \
-					| sed -e 1d \
-					| awk '{print $1" "$6" "$7}' \
-					| tr '\012' ',')"
-		OUTPUT2="total $(vgs --nosuffix --units g 2> /dev/null \
-					| sed -e 1d \
-					| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
-		OUTPUT="${OUTPUT1}${OUTPUT2}"
+		OUTPUT="$(vgs --noheadings --nosuffix --units g 2> /dev/null \
+						| awk '{print $1" "$6" "$7}' \
+						| tr '\012' ',')"
 	elif [[ $OSTYPE = HP-UX ]]
 	then
 		HEADER="Disks-vgs-sizesMB-total-and-free"
@@ -2490,6 +2783,7 @@ f_vgs()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2604,6 +2898,7 @@ f_vgs_extendable_auto()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2657,6 +2952,7 @@ f_vgs_extendable_raw()
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2674,31 +2970,34 @@ f_vgs_sanonly()
 	HEADER="Disks-vgs-sizesGB-SANONLY-total-and-free"
 	if [[ $OSTYPE = Linux ]]
 	then
-		LOCAL="$(pvs --noheadings 2> /dev/null \
-						| grep cciss \
-						| awk '{print $2}' \
-						| sort -u)"
-		if (( $(echo $LOCAL | wc -w) > 1 ))
+		if (( ! $AZURE && ! $VMWARE ))
 		then
-			LOCAL="$(echo $LOCAL |  tr '\012' '|' )"
-			OUTPUT1="$(vgs --nosuffix --noheading --units g 2> /dev/null \
-						| egrep -ve "$LOCAL" \
-						| awk '{print $1" "$6" "$7}' \
-						| tr '\012' ',')"
-			OUTPUT2="total $(vgs --nosuffix --noheading --units g 2> /dev/null \
-						| egrep -ve "$LOCAL" \
-						| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
+
+			LOCAL="$(pvs --noheadings 2> /dev/null \
+							| grep cciss \
+							| awk '{print $2}' \
+							| sort -u)"
+			if (( $(echo $LOCAL | wc -w) > 1 ))
+			then
+				LOCAL="$(echo $LOCAL | tr '\012' '|' )"
+				OUTPUT2="$(vgs --nosuffix --noheadings --units g 2> /dev/null \
+							| egrep -ve "$LOCAL" \
+							| awk '{print $1" "$6" "$7}' \
+							| tr '\012' ',')"
+			else
+				OUTPUT1="$(vgs --nosuffix --noheadings --units g 2> /dev/null \
+							| awk '{print $1" "$6" "$7}' \
+							| tr '\012' ',')"
+			fi
+			OUTPUT="${OUTPUT1}${OUTPUT2}"
+
 		else
-			OUTPUT1="$(vgs --nosuffix --noheading --units g 2> /dev/null \
-						| awk '{print $1" "$6" "$7}' \
-						| tr '\012' ',')"
-			OUTPUT2="total $(vgs --nosuffix --noheading --units g 2> /dev/null \
-						| awk '{sum+=$6;free+=$7}END{print sum" "free}')"
+			OUTPUT="VMWARE-no-computation-done"
 		fi
-		OUTPUT="${OUTPUT1}${OUTPUT2}"
 	else
 		OUTPUT="unknown"
 	fi
+
 	f_myprint
 }
 
@@ -2755,6 +3054,7 @@ f_emc()
 	else
 		OUTPUT="unknown_no-symcli"
 	fi
+
 	f_myprint
 	#
 	HEADER="EMC_Devices_SRDF"
@@ -2780,6 +3080,7 @@ f_emc()
 	else
 		OUTPUT="unknown_no-symcli"
 	fi
+
 	f_myprint
 	#
 	HEADER="EMC_Arrays"
@@ -2792,17 +3093,31 @@ f_emc()
 					| awk '{print $5}' \
 					| cut -c1-2 \
 					| sort -u)"
+
 		OUTPUTCLAR="$($SYMDIR/syminq -clariion -v 2> /dev/null \
 					| awk -F: '/Clariion ID/ {print $2}' \
 					| sort -u)"
-		OUTPUT="$OUTPUTSYMM $OUTPUTCLAR"
-		if [[ -z $OUTPUT ]]
+
+		if [[ -n $OUTPUTSYMM && -n $OUTPUTSYMM ]]
 		then
+			OUTPUT="$OUTPUTSYMM $OUTPUTCLAR"
+
+		elif [[ -n $OUTPUTSYMM ]]
+		then
+			OUTPUT="$OUTPUTSYMM"
+
+		elif [[ -n $OUTPUTCLAR ]]
+		then
+			OUTPUT="$OUTPUTCLAR"
+
+		else
 			OUTPUT="no_EMC_ARRAYS"
 		fi
+
 	else
 		OUTPUT="unknown_no-symcli"
 	fi
+
 	f_myprint
 }
 
@@ -2858,6 +3173,36 @@ f_asm()
 		fi
 	fi
 
+	if [[ -f $ORATAB ]]
+	then
+		MYASM=$(grep -v ^# $ORATAB \
+					| grep ^.ASM.: \
+					| sed -n 1p \
+					| awk -F: '{print $2}')
+	else
+		MYASM=""
+	fi
+
+	if [[ -n $MYASM ]]
+	then
+		TEMPOUT=$($MYASM/bin/srvctl status nodeapps \
+					| awk -F: '{print $2}' \
+					| sort -u \
+					| tr '\012' ' ')
+		if [[ -n $TEMPOUT ]]
+		then
+			OUTPUT="$OUTPUT $TEMPOUT"
+		fi
+	fi
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		TEMPOUT="$(rpm -qa 2> /dev/null \
+					| grep -i asm \
+					| tr '\012' ' ')"
+		OUTPUT="$OUTPUT $TEMPOUT"
+	fi
+
 	f_myprint
 }
 
@@ -2889,6 +3234,7 @@ f_oracle_rac()
 			OUTPUT="RAC_running_on_$RACSYSTEMS"
 		fi
 	fi
+
 	f_myprint
 }
 
@@ -2913,6 +3259,7 @@ f_veritas()
 	else
 		OUTPUT="no_VCS"
 	fi
+
 	f_myprint
 	#
 	#
@@ -2944,6 +3291,7 @@ f_veritas()
 	else
 		OUTPUT="no_VRTS_VXVM"
 	fi
+
 	f_myprint
 }
 
@@ -2970,6 +3318,7 @@ f_vscsi()
 	else
 		OUTPUT="not-applicable"
 	fi
+
 	f_myprint
 }
 
@@ -2996,6 +3345,7 @@ f_npiv()
 	else
 		OUTPUT="not-applicable"
 	fi
+
 	f_myprint
 }
 
@@ -3009,23 +3359,95 @@ f_console()
 	then
 		echo "INFO: function f_console"
 	fi
+
 	#######################################
 	HEADER="Console"
+	OUTPUT=""
 	if [[ $OSTYPE = AIX ]]
 	then
-		OUTPUT=$(lsrsrc IBM.ManagementServer \
+		MYCMD=lsrsrc
+		OUTPUT=$($MYCMD IBM.ManagementServer \
 			| grep Hostname \
 			| grep -v Local \
 			| awk -F= '{print $2}' \
 			| sed -e 's/"//g;s/^ //' \
 			| tr '\012' ',')
+
 		if [[ -z $OUTPUT ]]	
 		then
-			OUTPUT="not-found"
+			OUTPUT="$MYCMD-info-not-found"
 		fi
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		MYCMD=/opt/propplus/bin/cprop
+		if [[ -f $MYCMD ]]
+		then
+			OUTPUT=$($MYCMD -detail -c "Management Processor" \
+						2> /dev/null \
+						| awk -F: '/URL/ {print $2}')
+		else
+			OUTPUT="$MYCMD-cmd-not-found"
+		fi
+
+		if [[ -z $OUTPUT ]]	
+		then
+			OUTPUT="$MYCMD-info-not-found"
+		fi
+
+	elif [[ $OSTYPE = Linux ]]
+	then
+		if (( ! $AZURE && ! $VMWARE ))
+		then
+			OUTPUT="not-applicable"
+		else
+			#Try for the HP ILO
+			MYCMD=/sbin/hponcfg
+			if [[ -f $MYCMD ]]
+			then
+				OUTPUTFILE=/tmp/$(basename $MYCMD).$$
+				if (( $VERBOSE ))
+				then
+					echo "INFO: === Give us some time. Doing a $MYCMD ==="
+				fi
+				$MYCMD -a -w $OUTPUTFILE 2>&1 /dev/null 
+				OUTPUT=$(grep $MYGREPOPT "IP_ADDRESS VALUE" $OUTPUTFILE \
+						| sed -e 's/"/ /g' \
+						| awk -F= '{print $2}' \
+						| awk '{print $1}' \
+						| sed -e 's/ * //g')
+
+				if [[ -z $OUTPUT ]]	
+				then
+					OUTPUT=$(egrep $MYGREPOPT -e "DNS_NAME VALUE|DOMAIN_NAME VALUE" $OUTPUTFILE \
+						| sed -e 's/"/ /g' \
+						| awk -F= '{print $2}' \
+						| awk '{print $1}' \
+						| sed -e 's/ * //g' \
+						| tr '\012' '.' \
+						| sed -e 's/\.$//')
+				fi
+
+				rm $OUTPUTFILE 2> /dev/null
+	
+				if [[ -n $OUTPUT ]]	
+				then
+					OUTPUT="https-$OUTPUT"
+				fi
+			else
+				OUTPUT="$MYCMD-cmd-not-found"
+			fi
+	
+			if [[ -z $OUTPUT ]]	
+			then
+				OUTPUT="$MYCMD-info-not-found"
+			fi
+		fi
+
 	else
 		OUTPUT="not-applicable"
 	fi
+
 	f_myprint
 }
 f_dbms()
@@ -3038,22 +3460,30 @@ f_dbms()
 	then
 		echo "INFO: function f_dbms"
 	fi
+
 	#######################################
+	OUTPUT="no_Oracle"
 	HEADER="DBMS Oracle"
+
 	if [[ -f $ORATAB ]]
 	then
 		OUTPUT=$(egrep -ve '^$|^#' $ORATAB \
 				| grep -v ^* \
 				| grep ^.*: \
 				| awk -F: '{print $1}' \
+				| sort -u \
+				| grep -v ^$ \
 				| tr '\012' ',')
+
 		if [[ -z $OUTPUT ]]
 		then
 			OUTPUT="no_Oracle-instances"
 		fi
+
 	else
 		OUTPUT="no_Oracle"
 	fi
+
 	f_myprint
 }
 
@@ -3111,10 +3541,11 @@ f_clustered()
 					| tr '\012' ',')"
 		if [[ -z $OUTPUT ]]
 		then
-			OUTPUT="Cluster is NOT configured"
+			OUTPUT="ServiceGuard Cluster is NOT configured"
 		else
 			OUTPUT="ServiceGuard $OUTPUT"
 		fi
+
 	elif [[ -e $MYCMD2 ]]
 	then
 		MYCMD2="$MYCMD2 $MYCMD2OPTS"
@@ -3124,10 +3555,11 @@ f_clustered()
 					| tr '\012' ',')
 		if [[ -z $OUTPUT ]]
 		then
-			OUTPUT="Cluster is NOT configured"
+			OUTPUT="HAE(crm) Cluster is NOT configured"
 		else
 			OUTPUT="HAE(crm) $OUTPUT"
 		fi
+
 	elif [[ -e $MYCMD3 ]]
 	then
 		MYCMD3="$MYCMD3 $MYCMD3OPTS"
@@ -3153,11 +3585,12 @@ f_clustered()
 	
 			if [[ -z $OUTPUT ]]
 			then
-				OUTPUT="Cluster is NOT configured"
+				OUTPUT="HAE Cluster is NOT configured"
 			else
 				OUTPUT="HAE(crm_mon) $OUTPUT"
 			fi
 		fi
+
 	elif [[ -e $MYCMD4 ]]
 	then
 		MYCMD4="$MYCMD4 $MYCMD4OPTS"
@@ -3165,15 +3598,23 @@ f_clustered()
 					| awk '/^B / {print $2}' \
 					| sort -u \
 					| tr '\012' ',')
+
 		if [[ -z $OUTPUT ]]
 		then
-			OUTPUT="Cluster is NOT configured"
+			OUTPUT="VCS Cluster is NOT configured"
 		else
 			OUTPUT="VCS	$OUTPUT"
 		fi
+
 	else	
-		OUTPUT="Cluster software NOT installed"
+		OUTPUT="OS Cluster software NOT installed"
 	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="OS Cluster software NOT configured"
+	fi
+
 	f_myprint
 }
 
@@ -3220,6 +3661,7 @@ f_swap()
 	else
 		OUTPUT="swap-unknown"
 	fi
+
 	f_myprint
 }
 
@@ -3244,10 +3686,10 @@ f_automation ()
 			OUTPUT=$(awk -F= '{print $2}' $MYFILE)
 			if [[ -z $OUTPUT ]]
 			then
-				OUTPUT="no_automation-empty-file"
+				OUTPUT="unkown_automation_empty-file"
 			fi
 		else
-			OUTPUT="no_automation-file-not-found"
+			OUTPUT="no_automation_file-not-found"
 		fi
 	else
 		OUTPUT="not-applicable"
@@ -3280,21 +3722,26 @@ f_linuxvirt()
 		OUTPUT=""
 		MYOUTPUT1=$(dmidecode -s system-product-name 2> /dev/null)
 
-		if [[ -n $(echo $MYOUTPUT1 | grep -wi VMware) ]]
+		if [[ -n $(echo $MYOUTPUT1 | grep $MYGREPOPT -i VMware) ]]
 		then
 			#VMware Virtual Platform
 			OUTPUT=$MYOUTPUT1
 
-		elif [[ -n $(echo $MYOUTPUT1 | grep -wi VirtualBox) ]]
+		elif [[ -n $(echo $MYOUTPUT1 | grep $MYGREPOPT -i VirtualBox) ]]
 		then
 			OUTPUT=$MYOUTPUT1
 
-		elif [[ -n $(echo $MYOUTPUT1 | grep -wi KVM) ]]
+		elif [[ -n $(echo $MYOUTPUT1 | grep $MYGREPOPT -i KVM) ]]
 		then
 			#Qemu with KVM
 			OUTPUT=$MYOUTPUT1
 
-		elif [[ -n $(echo $MYOUTPUT1 | grep -wi Bochs) ]]
+		#elif [[ -n $(echo $MYOUTPUT1 | grep $MYGREPOPT -i "Microsoft Corporation") ]]
+		#then
+		#	#AZURE
+		#	OUTPUT=$MYOUTPUT1
+
+		elif [[ -n $(echo $MYOUTPUT1 | grep $MYGREPOPT -i Bochs) ]]
 		then
 			#Qemu (emulated) - Bochs
 			OUTPUT=$MYOUTPUT1
@@ -3329,7 +3776,7 @@ f_linuxvirt()
 		fi
 
 	else
-		OUTPUT="no_virtualization"
+		OUTPUT="not-applicable"
 	fi
 
 	f_myprint
@@ -3382,7 +3829,7 @@ f_hpvirtual()
 					for MYDISK in $MYDISKS
 					do
 						#Assume EMC or IBM (SVC), that is all we care about
-						TEMPOUT=$(ioscan -fkNC disk | grep -w $MYDISK )
+						TEMPOUT=$(ioscan -fkNC disk | grep $MYGREPOPT $MYDISK )
 						if [[ -n $(echo $TEMPOUT | grep EMC) ]]
 						then
 							let MYEMC=$MYEMC+1
@@ -3404,7 +3851,9 @@ f_hpvirtual()
 		else
 			OUTPUT="no_VMs"
 		fi
+
 		f_myprint
+
         #
         # containers
         #
@@ -3428,29 +3877,27 @@ f_hpvirtual()
 		else
 			OUTPUT="no_containers"
 		fi
+
 		f_myprint
+
         #
         # vpars
         #
 		MYVMPATH=/usr/sbin
 		MYCMD=$MYVMPATH/vparstatus
 		VALID=""
+
 		if [[ -f $MYCMD ]]
 		then
-			VALID="$($MYCMD 2> /dev/null)"
+			VALID="$($MYCMD -M 2> /dev/null)"
 		fi
+
 		if [[ -n $VALID ]]
 		then
-			if [[ $(uname -r)  = B.11.00 ]]
-			then
-				OUTPUT=$($MYCMD 2> /dev/null \
-					| awk '/\[Virtual Partition\]/, /^$/ {print $1}' \
-					| sed -e 1,4d | grep -v ^$ | tr '\012' ' ')
-			else
-				OUTPUT=$($MYCMD 2> /dev/null \
-					| awk '/\[Virtual Partition\]/, /^$/ {print $2}' \
-					| sed -e 1,3d | grep -v ^$ | tr '\012' ' ')
-			fi
+			OUTPUT=$($MYCMD -M 2> /dev/null \
+					| awk -F: '{print $1}' \
+					| tr '\012' ' ')
+
 			if [[ -z $OUTPUT ]]
 			then
 				OUTPUT="no_vpars"
@@ -3460,17 +3907,22 @@ f_hpvirtual()
 		else
 			OUTPUT="no_vpars"
 		fi
+
 		f_myprint
+
 	else
 		#VM
 		OUTPUT="not-applicable"
 		f_myprint
+
 		#Container
 		OUTPUT="not-applicable"
 		f_myprint
+
 		#Vpar
 		OUTPUT="not-applicable"
 		f_myprint
+
 	fi
 }
 
@@ -3513,10 +3965,10 @@ f_companyinfo ()
 		#============================================================
 		#
 
-        OUTPUT=""
+
+		MYLINE=""
 		MYCNT=1
 		MYCOUNT=$(grep -v ^# $COMPANYINFOFILE | wc -l | awk '{print $1}')
-		HOSTNAME=$(hostname)
 
 		if (( $MYCOUNT ))
 		then
@@ -3524,13 +3976,20 @@ f_companyinfo ()
 			do
 				MYLINE=$(grep -v ^# $COMPANYINFOFILE \
 							| sed -n ${MYCNT}p )
-				HEADER="Companyinfo, $(echo $MYLINE | awk -F= '{print $1}' \
-							| sed -e 's/ * //g')"
-				OUTPUT="$(echo $MYLINE | awk -F= '{print $2}')"
 
-				f_myprint
+				#If - HEADER is empty (first run), diff on subsequent runs
+				if  (( $MYCNT == 1 ))
+				then
+					OUTPUT="$MYLINE"
+
+				else
+					OUTPUT="$OUTPUT % $MYLINE"
+				fi
+
 				let MYCNT=$MYCNT+1
 			done
+
+			f_myprint
 		else
 			OUTPUT="no_entries-in-$COMPANYINFOFILE"
 			f_myprint
@@ -3620,10 +4079,10 @@ f_perfprofile ()
 			OUTPUT=$(cat $MYFILE)
 			if [[ -z $OUTPUT ]]
 			then
-				OUTPUT="no_performance-empty-file"
+				OUTPUT="no_performance_empty-file"
 			fi
 		else
-			OUTPUT="no_performance-file-not-found"
+			OUTPUT="no_performance_file-not-found"
 		fi
 	else
 		OUTPUT="not-applicable"
@@ -3651,21 +4110,17 @@ f_centrify ()
 	#######################################
 	HEADER="Centrify"
 
-	if [[ $OSTYPE = Linux ]]
+	MYFILE=/usr/bin/adinfo
+
+	if [[ -f $MYFILE ]]
 	then
-		MYFILE=/usr/bin/adinfo
-		if [[ -x $MYFILE ]]
+		OUTPUT=$($MYFILE --server; adinfo --zone | awk -F/ '{print $NF}')
+		if [[ -z $OUTPUT ]]
 		then
-			OUTPUT=$( adinfo --server; adinfo --zone | awk -F/ '{print $NF}')
-			if [[ -z $OUTPUT ]]
-			then
-				OUTPUT="no_domains-not-setup"
-			fi
-		else
-			OUTPUT="no_centrify-file-not-found"
+			OUTPUT="no_domains-not-setup"
 		fi
 	else
-		OUTPUT="not-applicable"
+		OUTPUT="no_centrify-file-not-found"
 	fi
 
 	if [[ -z $OUTPUT ]]
@@ -3673,6 +4128,296 @@ f_centrify ()
 		OUTPUT="no_centrify"
 	fi
 	
+	f_myprint
+}
+
+f_multipath()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_multipath"
+	fi
+	#######################################
+	HEADER="Multipath"
+	OUTPUT=""
+	
+	#see if powerpath first, if so, then that would probably be our
+	#multipathing s/w (assumption)
+	#if no powerpath, then look for native
+	#see if there configured devices too to qualify
+
+	if [[ $OSTYPE = Linux ]]
+	then
+		OUTPUT="$(rpm -qa EMCpower.LINUX 2> /dev/null )"
+		COUNT=$(powermt display dev=all 2> /dev/null | grep $MYGREPOPT -c active)
+
+		if [[ -z $OUTPUT || $COUNT = 0 ]]
+		then
+			OUTPUT=$(rpm -qa | grep -i multipath | grep -v libs)
+			COUNT=$(multipath -ll 2> /dev/null | grep -c ^mpath)
+
+			if [[ -z $OUTPUT || $COUNT = 0 ]]
+			then
+				OUTPUT="no multipathing found or is not configured"
+			else
+				OUTPUT_SVC=$(multipathd -k'show config' \
+								| sed -n /\"${SVCMODEL}/,/}/p \
+								| sed -e 's/\t//g' \
+								| tr '\012' ',' \
+								| sed -e 's/,$//')
+
+				if [[ -n $OUTPUT_SVC ]]
+				then
+					OUTPUT="$OUTPUT,$COUNT,$OUTPUT_SVC"
+				else
+					OUTPUT="$OUTPUT,$COUNT"
+				fi
+			fi
+		else
+			OUTPUT_SVC=$(multipathd -k'show config' \
+							| sed -n /$SVCMODEL/,/}/p \
+							| sed -e 's/\t//g' \
+							| tr '\012' ',' \
+							| sed -e 's/,$//')
+			if [[ -n $OUTPUT_SVC ]]
+			then
+				OUTPUT="$OUTPUT,$COUNT,$OUTPUT_SVC"
+			else
+				OUTPUT="$OUTPUT,$COUNT"
+			fi
+		fi
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		OUTPUT="$(swlist EMCpower 2> /dev/null \
+				| grep -i EMCpower \
+				| sed -n 1p \
+				| awk '{print $3}')"
+
+		if [[ -n $(uname -r | grep B.11.31) && -z $OUTPUT ]]
+		then
+			OUTPUT="native-multipath"
+
+		else
+			COUNT=$(powermt display dev=all 2> /dev/null | grep $MYGREPOPT -c active)
+
+			if [[ -z $OUTPUT || $COUNT = 0 ]]
+			then
+				OUTPUT="no multipathing found or is not configured"
+			else
+				OUTPUT="$OUTPUT,$COUNT"
+			fi
+		fi
+	else
+		OUTPUT="unknown"
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="could-not-determine"
+	fi
+
+	f_myprint
+}
+
+f_multipath_check_svc()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_multipath_check_svc"
+	fi
+	#######################################
+	HEADER="Multipath_check_svc"
+	OUTPUT=""
+	
+	if [[ $OSTYPE = Linux ]]
+	then
+		SVCLSSCI="$(lsscsi | grep IBM | grep $SVCMODEL)"
+
+		if [[ -n $SVCLSSCI ]]
+		then
+			MPATHDEVICES=$(multipath -l \
+							| grep IBM,$SVCMODEL \
+							| awk '{print $1}')
+
+			FAILCOUNT=0
+
+			for MPATHDEVICE in $MPATHDEVICES
+			do
+				if (( $VERBOSE ))
+				then
+					echo "INFO: doing multipath check on $MPATHDEVICE"
+				fi
+				#echo $MPATHDEVICE
+				FOUNDCOUNT=$(multipath -l $MPATHDEVICE | grep -c running)
+				if (( $FOUNDCOUNT < $SVCPATHCOUNT ))
+				then
+					let FAILCOUNT+=1
+				fi
+			done
+			if (( $FAILCOUNT ))
+			then
+				OUTPUT="ERROR_COUNT_FAILED_PATHS is $FAILCOUNT"
+			else
+				OUTPUT="All devices have at least $SVCPATHCOUNT paths"
+			fi
+		else
+			OUTPUT="no-SVC-devices-found"
+		fi
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+
+		OUTPUT="not-checked"
+
+#		if [[ -n $(uname -r | grep B.11.31) ]]
+#		then
+#			SVCDISKS="$(ioscan -m lun \
+#						| grep "IBM.*${SVCMODEL}"\
+#						| awk '{print $2}')"
+#		else
+#			SVCDISKS="$(ioscan -FknC disk \
+#						| grep -iv "dvd" \
+#						| grep -iv "cdr" \
+#						| sed 'N;s/\n/ /' \
+#						| grep "IBM.*${SVCMODEL}" \
+#						| awk '{print $2}')"
+#		fi
+#
+#		if [[ -n $SVCDISKS ]]
+#		then
+#			FAILCOUNT=0
+#
+#			if [[ -n $(uname -r | grep B.11.31) ]]
+#			then
+#				for MPATHDEVICE in $SVCDISKS
+#				do
+#					#echo $MPATHDEVICE
+#					FOUNDCOUNT=$(ioscan -m lun /dev/disk/disk${MPATHDEVICE} \
+#								| sed -e 1,3d \
+#								| grep -vw disk${MPATHDEVICE} \
+#								| wc -l)
+#					if (( $FOUNDCOUNT < $SVCPATHCOUNT_HP ))
+#					then
+#						let FAILCOUNT+=1
+#					fi
+#				done
+#
+#			else
+#				for MPATHDEVICE in $SVCDISKS
+#				do
+#					#echo $MPATHDEVICE
+#					FOUNDCOUNT=$(ioscan -FknC disk $MPATHDEVICE \
+#								| sed -e 1d \
+#								| wc -w)
+#					if (( $FOUNDCOUNT < $SVCPATHCOUNT_HP ))
+#					then
+#						let FAILCOUNT+=1
+#					fi
+#				done
+#			fi
+#
+#			if (( $FAILCOUNT ))
+#			then
+#				OUTPUT="ERROR_COUNT_FAILED_PATHS is $FAILCOUNT"
+#			else
+#				OUTPUT="All devices have at least $SVCPATHCOUNT_HP paths"
+#			fi
+#		else
+#			OUTPUT="no-SVC-devices-found"
+#		fi
+
+	else
+		OUTPUT="no-SVC-disks-to-test"
+	fi
+
+	f_myprint
+}
+
+f_sanboot()
+{
+	if (( DEBUG ))
+	then
+		set -x
+	fi
+	if (( $VERBOSE ))
+	then
+		echo "INFO: function f_sanboot"
+	fi
+	#######################################
+	HEADER="SanBoot"
+	OUTPUT=""
+	
+	if [[ $OSTYPE = Linux ]]
+	then
+		#do we find any disks in LVM control?
+		FOUND=$(pvs | wc -l)
+
+		if (( $FOUND ))
+		then
+			MYDISK=$(pvs \
+					| grep vg00 \
+					| sed -n 1p \
+					| awk '{print $1}' \
+					| awk -F/ '{print $NF}' )
+
+			if [[ -n $(echo $MYDISK | grep sd) ]]
+			then
+				#/dev/sda4
+				MYDISK=$(echo $MYDISK | cut -c 1-3)   #get rid of partition num
+			else
+				MYDISK=$(echo $MYDISK | awk -F/ '{print $NF}') 
+			fi
+			#else /dev/cciss/c0d0p4, this is internal, no action needed
+	
+			if [[ -n $(lsscsi | grep $MYGREPOPT $MYDISK | egrep -e 'EMC|SVC|HDS') ]]
+			then
+				OUTPUT="SAN-BOOT-true"
+			else
+				OUTPUT="no-san-boot"
+			fi
+		else
+			#since no pvs output, then assume no SAN boot
+			OUTPUT="no-san-boot"
+		fi
+
+	elif [[ $OSTYPE = HP-UX ]]
+	then
+		MYDISK=$(lvlnboot -v 2> /dev/null \
+				| grep "Boot Disk" \
+				| sed -n 1p \
+				| awk '{print $1}' \
+				| awk -F/ '{print $NF}' )
+
+		if [[ -n $(uname -r | grep B.11.31) ]]
+		then
+			MYCMD="ioscan -m lun"
+		else
+			MYCMD="ioscan -FknC disk"
+		fi
+
+		#If either EMC, HDS, SVC
+		if [[ -n $($MYCMD | sed 'N;s/\n/ /' | grep $MYGREPOPT $MYDISK | egrep -e 'EMC|SVC|HDS') ]]
+		then
+			OUTPUT="SAN-BOOT-true"
+		else
+			OUTPUT="no-san-boot"
+		fi
+	fi
+
+	if [[ -z $OUTPUT ]]
+	then
+		OUTPUT="could-not-determine"
+	fi
+
 	f_myprint
 }
 
@@ -3698,6 +4443,9 @@ f_post()
 	OUTPUT="$(grep -i "#.*VERSION:" $0 \
 							| sed -n 1p \
 							| awk '{print $3}')"
+	OUTPUT="$OUTPUT $(grep "^#.*Revision" $0 \
+								| sed -n 1p \
+								| awk '{print $3}')"
 	f_myprint
 
 	#######################################
@@ -3728,7 +4476,7 @@ do
 			FILLER=1
 			;;
 
-		-line|-list)
+		-l|-line|-list)
 			shift
 			SINGLE_LINE_OUTPUT=1
 			;;
@@ -3742,8 +4490,19 @@ do
 			shift
 			LEVEL=$1
 			shift
-			if [[ -z $(echo $LEVEL | egrep -we 'b|m|f') ]]
+			if (( $(echo $LEVEL | wc -c) > 2 ))
 			then
+				#assume someone put a "-X" in, remove the first char
+				LEVEL=$(echo $LEVEL | cut -c2)
+			fi
+			if [[ -z $(echo $LEVEL | egrep $MYGREPOPT -e 'b|m|f|s') ]]
+			then
+				#on some HPUX, egprep and grep have issues
+				#either use grep, or egrep w/ no -w
+				#if (( $? ))
+				#then
+				#fi
+
 				f_usage
 				ERRVAL=1
 				ERRMSG="Incorrect option for '-level' of: $LEVEL \n"
@@ -3818,23 +4577,20 @@ do
 			;;
 
 		-version) 
-			echo "$0: Version: $(grep -i "#.*VERSION:" $0 \
+			echo "$0: Version: $(grep -i "^#.*VERSION:" $0 \
 							| sed -n 1p \
 							| awk '{print $3}' )"
 
-		    echo "$0: RCS-Revision: $(grep "# Revision" $0 \
+		    echo "$0: RCS-Revision: $(grep "^#.*Revision" $0 \
 								| sed -n 1p \
 								| awk '{print $3}')"
-
 			exit 0
 			;;
 
 		#help
 		-h*|--h*)
 			f_usage
-			ERRVAL=1
-			ERRMSG="Help getting syntax/usage.\n"
-			f_fatal
+			exit 0
 			;;
 
 		-info | -doc) 
@@ -3885,6 +4641,7 @@ then
 	f_runfunction f_hostname
 	f_runfunction f_domain
 	f_runfunction f_ostype
+	f_runfunction f_osbuild
 	f_runfunction f_patch
 	f_runfunction f_model
 	f_runfunction f_arch
@@ -3904,6 +4661,7 @@ then
 	f_runfunction f_hostname
 	f_runfunction f_domain
 	f_runfunction f_ostype
+	f_runfunction f_osbuild
 	f_runfunction f_patch
 	f_runfunction f_model
 	f_runfunction f_arch
@@ -3917,19 +4675,58 @@ then
 	f_runfunction f_pagesize
 	f_runfunction f_kerneltype
 	f_runfunction f_swap
+	#
+	# above: short list
+	# below: additional for the medium list
+	# total of both is the "medium list"
+	#
 	f_runfunction f_vip
 	f_runfunction f_nic
 	f_runfunction f_hba
 	f_runfunction f_hba_spec
 	f_runfunction f_raid
-	f_runfunction f_emc
-	f_runfunction f_disks
-	f_runfunction f_disks_total_size
 
-else
+elif [[ $LEVEL = s ]]
+then
+	#
+	#this level different than the others, it is it's own set of functions
+	#
 	f_runfunction f_hostname
 	f_runfunction f_domain
 	f_runfunction f_ostype
+	f_runfunction f_osbuild
+	f_runfunction f_patch
+	f_runfunction f_model
+	f_runfunction f_arch
+	f_runfunction f_firmware
+	f_runfunction f_kerneltype
+	f_runfunction f_hba
+	f_runfunction f_hba_spec
+	f_runfunction f_raid
+	f_runfunction f_dbms
+	f_runfunction f_oracle_rac
+	f_runfunction f_asm
+	f_runfunction f_clustered
+	f_runfunction f_veritas
+	f_runfunction f_linuxvirt
+	f_runfunction f_hpvirtual
+	f_runfunction f_emc
+	f_runfunction f_disks
+	f_runfunction f_disks_total_size
+	f_runfunction f_multipath
+	f_runfunction f_multipath_check_svc
+	f_runfunction f_sanboot
+	f_runfunction f_vgs
+	f_runfunction f_vgs_sanonly
+	f_runfunction f_vgs_extendable_auto
+	f_runfunction f_vgs_extendable_raw
+
+else  #full
+
+	f_runfunction f_hostname
+	f_runfunction f_domain
+	f_runfunction f_ostype
+	f_runfunction f_osbuild
 	f_runfunction f_patch
 	f_runfunction f_model
 	f_runfunction f_arch
@@ -3943,14 +4740,19 @@ else
 	f_runfunction f_pagesize
 	f_runfunction f_kerneltype
 	f_runfunction f_swap
+	#
+	# "medium list"
+	#
 	f_runfunction f_vip
 	f_runfunction f_nic
 	f_runfunction f_hba
 	f_runfunction f_hba_spec
 	f_runfunction f_raid
-	f_runfunction f_emc
-	f_runfunction f_disks
-	f_runfunction f_disks_total_size
+	#
+	# above: short plus medium list
+	# below: additional for the long list
+	# total of both is the "long list"
+	#
 	f_runfunction f_dbms
 	f_runfunction f_oracle_rac
 	f_runfunction f_asm
@@ -3960,16 +4762,22 @@ else
 	f_runfunction f_automation
 	f_runfunction f_linuxvirt
 	f_runfunction f_hpvirtual
-	f_runfunction f_vgs
-	f_runfunction f_vgs_sanonly
-	f_runfunction f_vgs_extendable_auto
-	f_runfunction f_vgs_extendable_raw
 	f_runfunction f_stats
 	f_runfunction f_security
 	f_runfunction f_perfprofile
 	f_runfunction f_centrify
 	f_runfunction f_companyinfo
 	f_runfunction f_console
+	f_runfunction f_emc
+	f_runfunction f_disks
+	f_runfunction f_disks_total_size
+	f_runfunction f_multipath
+	f_runfunction f_multipath_check_svc
+	f_runfunction f_sanboot
+	f_runfunction f_vgs
+	f_runfunction f_vgs_sanonly
+	f_runfunction f_vgs_extendable_auto
+	f_runfunction f_vgs_extendable_raw
 fi
 #
 f_post
