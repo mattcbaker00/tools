@@ -53,6 +53,15 @@
 ################################################################################
 #
 # $Log: client_add_user,v $
+# Revision 1.9  2018/05/17 18:56:16  jbakerm1
+# changed == to = for test, hpux didn't like it
+#
+# Revision 1.8  2018/05/16 19:18:34  jbakerm1
+# changed changed ssh-keygen quotes
+#
+# Revision 1.7  2018/05/16 16:22:59  jbakerm1
+# added ssh-keygen and other changes
+#
 # Revision 1.6  2018/01/09 20:58:31  jbakerm1
 # changed to 12 char passwords w/ a variable
 #
@@ -71,13 +80,14 @@
 # Revision 1.1  2016/01/28 20:44:31  jbakerm1
 # Initial revision
 #
-#
+################################################################################
+#VERSION:2018.05.16.001
 ################################################################################
 
 ################################################################################
 # VARIABLES
 ################################################################################
-MYMAILDOMAIN=computeranddata.com
+MYMAILDOMAIN=jci.com
 #
 DEBUG=0
 VERBOSE=0
@@ -280,7 +290,7 @@ then
 fi
 
 if [[ -z $(echo $SUPOS | grep -w $OSTYPE) ]]
-mhen
+then
 	echo "INFO: Supported OS flavors are: $SUPOS"
 	ERRVAL=12
 	ERRMSG="ERROR:2:Unsupported OS $OSTYPE."
@@ -597,6 +607,12 @@ f_genericusers ()
 			#
 			chage -M 99999 $MYUSER 
 
+			echo "ACTION: Setting up GENERIC ssh keys for $MYUSER" \
+					| tee -a $LOGFILE
+			#
+			su - $MYUSER -c "echo y \
+					| ssh-keygen -f ~/.ssh/id_rsa -t rsa -q -N ''"
+
 		elif [[ $OSTYPE = AIX ]]
 		then
 			echo "ACTION: Setting up GENERIC attributes for $MYUSER" \
@@ -621,6 +637,9 @@ f_genericusers ()
 			else
 				chuser ttys=/dev/console $MYUSER
 			fi
+		else
+			echo "INFO: No action taken for the generic user $MYUSER" \
+					| tee -a $LOGFILE
 		fi
 	fi
 }
@@ -711,7 +730,7 @@ f_addusers()
 			else
 				echo "INFO: $MYUSER added to system"
 	
-				if [[ $GENERIC == 1 || -n $(echo $MYTYPE | grep -i NHID) ]]
+				if [[ $GENERIC = 1 || -n $(echo $MYTYPE | grep -i NHID) ]]
 				then
 					echo "INFO: Generic User $MYUSER"
 					f_genericusers

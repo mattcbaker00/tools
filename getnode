@@ -22,13 +22,16 @@
 #
 # Written by Matt Baker mbaker@computeranddata.com
 #
-# Version: 2018.03.05.0001
+# Version: 2018.06.05.0001
 #
 #DOCEND
 #
 ################################################################################
 #
 # $Log: getnode,v $
+# Revision 1.42  2018/06/05 21:51:33  jbakerm1
+# fixed subscription areas, numerous bugs
+#
 # Revision 1.41  2018/03/05 16:04:27  jbakerm1
 # fixed hponcfg stderr/stdout capture
 #
@@ -729,38 +732,56 @@ f_osbuild()
 	if [[ $OSTYPE = Linux ]]
 	then
 		#for Redhat, there can be multiple pem files
-		#old deprecated
-		MYFILE1a=$(echo /etc/pki/product/*.pem)
-		#new future (but both exist on the same system)
-		MYFILE1b=$(echo /etc/pki/product-default/*.pem)
+			#both directory styles can exist on the same system
+
+			#new future 
+			MYDIR1a=/etc/pki/product
+			MYFILE1a=$(echo $MYDIR1a/*.pem)
+
+			#old deprecated
+			MYDIR1b=/etc/pki/product-default
+			MYFILE1b=$(echo $MYDIR1b/*.pem)
 
 		#for Suse, there should be a single file (this is a link)
-		MYFILE2=/etc/products.d/baseproduct
-		if [[ -f $MYFILE1a ||  -f $MYFILE1b ]]
+		MYDIR2=/etc/products.d
+		MYFILE2=$MYDIR2/baseproduct
+
+		if [[ -d $MYDIR1a || -d $MYDIR1b ]]
 		then
-			if [[ -f $MYFILE1a ||  -f $MYFILE1b ]]
+			if [[ -n $(echo $MYFILE1a) ]]
+			then
+				MYFILE1=$MYFILE1a
+
+			elif [[ -n $(echo $MYFILE1b) ]]
 			then
 				MYFILE1=$MYFILE1b
+
 			else
-				MYFILE1=$MYFILE1a
+				OUTPUT="unknown"
 			fi
 			#Redhat/RHEL
 			#this will be a long/full list IF there are multiple pem files
 			#which would be unique (base installs only have 1 file)
 			#others would be: if "grid computing" or if a HPC
-			OUTPUT=$(rct cat-cert  $MYFILE1 \
-				| egrep -we "Serial:|ID:|Name:|Version:|Tags:" \
-				| awk -F: '{print $2}' \
-				| sed -e '1d;$d' \
-				| tr '\012' ',')
+			if [[ -z $OUTPUT ]]
+			then
+				for MYFILELOOP in $MYFILE1
+				do
+					OUTPUT="$OUTPUT $(rct cat-cert  $MYFILELOOP \
+						| egrep -we "Serial:|ID:|Name:|Version:|Tags:" \
+						| awk -F: '{print $2}' \
+						| sed -e '1d;$d' \
+						| tr '\012' ',')"
+				done
+			fi
 
 		elif [[ -f $MYFILE2 ]]
 		then
 			#Suse/SLES
-			if [[ -n $(grep upgrades $MYFILE2) ]]
+			if [[ -n $(grep updates $MYFILE2) ]]
 			then
 				#SLES: 12
-				OUTPUT=$(sed -e '/<upgrades/,/<\/upgrades/d' \
+				OUTPUT=$(sed -e '/<updates/,/<\/updates/d' \
 					$MYFILE2 \
 					| egrep -hwe \
 					'updaterepokey|summary|producttheme|distribution' \
@@ -768,7 +789,7 @@ f_osbuild()
 					| tr '\012' ',')
 			else
 				#SLES: 11
-				OUTPUT=$(sed -e '/<updates/,/<\/updates/d' \
+				OUTPUT=$(sed -e '/<upgrades/,/<\/upgrades/d' \
 					$MYFILE2 \
 					| egrep -hwe \
 					'updaterepokey|summary|producttheme|distribution' \
